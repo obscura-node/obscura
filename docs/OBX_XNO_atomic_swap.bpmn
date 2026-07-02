@@ -1,0 +1,528 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Obscura (OBX) <-> Nano (XNO) trustless cross-chain ATOMIC SWAP.
+
+  A scriptless 2-of-2 adaptor swap implemented in this repo:
+    pkg/swapsession  - the 6-message state machine (+ ClaimDone/Abort) and crypto
+    pkg/swapnet      - the directed P2P transport, session coordinator, reconnect
+    cmd/obscura-node - the OBX chain host + the real Nano backend (operator-configured RPC; default rainstorm)
+
+  Roles (run as TWO INDEPENDENT MINING NODES, in parallel):
+    TAKER - funds the real XNO leg, claims the OBX leg.   (buyer: pays XNO, gets OBX)
+    MAKER - funds the OBX leg, sweeps the real XNO leg.   (seller: gives OBX, gets XNO)
+
+  Parallelism captured here:
+    * Each party runs MINING in parallel with the swap protocol (top parallel split).
+    * The MAKER recovers the adaptor secret + sweeps the XNO INDEPENDENTLY of any
+      taker cooperation: it scrapes the on-chain claim signature in parallel with the
+      (ignored) ClaimDone courtesy relay - the griefing-resistant fund-recovery path.
+
+  Safety: a token reaching "Abort -> arm OBX refund" or a never-confirmed leg is made
+  whole by the funder's timelock+refund; no step locks value before the prior leg is
+  verified (safe-leg ordering).
+-->
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  id="Defs_OBX_XNO_Swap"
+                  targetNamespace="https://obscura.local/swap">
+
+  <bpmn:collaboration id="Collab_Swap">
+    <bpmn:participant id="Part_Taker" name="TAKER node  (funds XNO, claims OBX)" processRef="Proc_Taker"/>
+    <bpmn:participant id="Part_Maker" name="MAKER node  (funds OBX, sweeps XNO)" processRef="Proc_Maker"/>
+    <bpmn:participant id="Part_OBX"   name="OBX chain  (class-group PoW, swap outputs)" processRef="Proc_OBX"/>
+    <bpmn:participant id="Part_XNO"   name="Nano (XNO) network  (operator-configured RPC; default rainstorm)" processRef="Proc_XNO"/>
+
+    <!-- protocol messages (directed swapnet envelopes) -->
+    <bpmn:messageFlow id="MF_Init"       name="Init (terms, SwapID)"         sourceRef="T_send_init"     targetRef="M_recv_init"/>
+    <bpmn:messageFlow id="MF_MakerCommit" name="MakerCommit (B, PoP, nonce)" sourceRef="M_send_mc"       targetRef="T_recv_mc"/>
+    <bpmn:messageFlow id="MF_Funded"     name="Funded (SwapKey, unlock h)"   sourceRef="M_send_funded"   targetRef="T_recv_funded"/>
+    <bpmn:messageFlow id="MF_XNOLocked"  name="XNOLocked (lock id)"          sourceRef="T_send_locked"   targetRef="M_recv_locked"/>
+    <bpmn:messageFlow id="MF_ClaimReq"   name="ClaimRequest (core hash)"     sourceRef="T_send_claimreq" targetRef="M_recv_claimreq"/>
+    <bpmn:messageFlow id="MF_ClaimPreSig" name="ClaimPreSig (maker half)"    sourceRef="M_send_presig"   targetRef="T_recv_presig"/>
+    <bpmn:messageFlow id="MF_ClaimDone"  name="ClaimDone (courtesy hint)"    sourceRef="T_send_done"     targetRef="M_recv_done"/>
+    <bpmn:messageFlow id="MF_Abort"      name="Abort"                        sourceRef="T_abort"         targetRef="M_recv_locked"/>
+
+    <!-- on-chain interactions -->
+    <bpmn:messageFlow id="MF_FundTx"   name="fund SwapOut tx"      sourceRef="M_fund"   targetRef="OBX_accept"/>
+    <bpmn:messageFlow id="MF_RelayTx"  name="relay claim tx"       sourceRef="T_relay"  targetRef="OBX_accept"/>
+    <bpmn:messageFlow id="MF_ClaimMined" name="claim mined (S_full on-chain)" sourceRef="OBX_mine" targetRef="M_scrape"/>
+    <bpmn:messageFlow id="MF_LockXNO"  name="send XNO to joint 2-of-2" sourceRef="T_lock"  targetRef="XNO_recv"/>
+    <bpmn:messageFlow id="MF_SweepXNO" name="receive+send joint -> sweep addr" sourceRef="M_sweep" targetRef="XNO_recv"/>
+  </bpmn:collaboration>
+
+  <!-- ============================ TAKER ============================ -->
+  <bpmn:process id="Proc_Taker" isExecutable="false">
+    <bpmn:startEvent id="T_start" name="Decide to buy OBX">
+      <bpmn:outgoing>f_t0</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:parallelGateway id="T_par_split" name="run mining || swap">
+      <bpmn:incoming>f_t0</bpmn:incoming>
+      <bpmn:outgoing>f_t_mine</bpmn:outgoing>
+      <bpmn:outgoing>f_t1</bpmn:outgoing>
+    </bpmn:parallelGateway>
+    <bpmn:task id="T_mine" name="Sync chain / mine (continuous, parallel)">
+      <bpmn:incoming>f_t_mine</bpmn:incoming>
+      <bpmn:outgoing>f_t_mine_end</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:endEvent id="T_end_mine" name="(runs for node lifetime)">
+      <bpmn:incoming>f_t_mine_end</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:task id="T_take" name="Take offer: reserve a slice (size = XNO to pay)">
+      <bpmn:incoming>f_t1</bpmn:incoming>
+      <bpmn:outgoing>f_t2</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:sendTask id="T_send_init" name="Send Init (mint unguessable SwapID)">
+      <bpmn:incoming>f_t2</bpmn:incoming>
+      <bpmn:outgoing>f_t3</bpmn:outgoing>
+    </bpmn:sendTask>
+    <bpmn:receiveTask id="T_recv_mc" name="Receive MakerCommit">
+      <bpmn:incoming>f_t3</bpmn:incoming>
+      <bpmn:outgoing>f_t4</bpmn:outgoing>
+    </bpmn:receiveTask>
+    <bpmn:task id="T_handle_mc" name="Verify maker share B, PoP; derive K=A+B, T=sA·G">
+      <bpmn:incoming>f_t4</bpmn:incoming>
+      <bpmn:outgoing>f_t5</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:receiveTask id="T_recv_funded" name="Receive Funded">
+      <bpmn:incoming>f_t5</bpmn:incoming>
+      <bpmn:outgoing>f_t6</bpmn:outgoing>
+    </bpmn:receiveTask>
+    <bpmn:exclusiveGateway id="T_gw_sync" name="OBX SwapOut visible in my chain?">
+      <bpmn:incoming>f_t6</bpmn:incoming>
+      <bpmn:incoming>f_t_sync_back</bpmn:incoming>
+      <bpmn:outgoing>f_t_sync_no</bpmn:outgoing>
+      <bpmn:outgoing>f_t7</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:task id="T_wait_sync" name="Wait 2s for funding block to sync (poll, bounded)">
+      <bpmn:incoming>f_t_sync_no</bpmn:incoming>
+      <bpmn:outgoing>f_t_sync_back</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_verify" name="Verify OBX lock: amount, claim key, claim window">
+      <bpmn:incoming>f_t7</bpmn:incoming>
+      <bpmn:outgoing>f_t8</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:exclusiveGateway id="T_gw_valid" name="Lock terms valid &amp; claimable?">
+      <bpmn:incoming>f_t8</bpmn:incoming>
+      <bpmn:outgoing>f_t_invalid</bpmn:outgoing>
+      <bpmn:outgoing>f_t9</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:sendTask id="T_abort" name="Send Abort (no XNO locked - nothing at risk)">
+      <bpmn:incoming>f_t_invalid</bpmn:incoming>
+      <bpmn:outgoing>f_t_abort_end</bpmn:outgoing>
+    </bpmn:sendTask>
+    <bpmn:endEvent id="T_end_abort" name="Aborted">
+      <bpmn:incoming>f_t_abort_end</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:serviceTask id="T_lock" name="Lock REAL XNO to joint (sA+sB)·G account (Nano send)">
+      <bpmn:incoming>f_t9</bpmn:incoming>
+      <bpmn:outgoing>f_t10</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:sendTask id="T_send_locked" name="Send XNOLocked">
+      <bpmn:incoming>f_t10</bpmn:incoming>
+      <bpmn:outgoing>f_t11</bpmn:outgoing>
+    </bpmn:sendTask>
+    <bpmn:task id="T_build_claim" name="Build claim request (core hash to co-sign)">
+      <bpmn:incoming>f_t11</bpmn:incoming>
+      <bpmn:outgoing>f_t12</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:sendTask id="T_send_claimreq" name="Send ClaimRequest">
+      <bpmn:incoming>f_t12</bpmn:incoming>
+      <bpmn:outgoing>f_t13</bpmn:outgoing>
+    </bpmn:sendTask>
+    <bpmn:receiveTask id="T_recv_presig" name="Receive ClaimPreSig (maker pre-sig half)">
+      <bpmn:incoming>f_t13</bpmn:incoming>
+      <bpmn:outgoing>f_t14</bpmn:outgoing>
+    </bpmn:receiveTask>
+    <bpmn:task id="T_finalize" name="Finalize claim: aggregate full sig (reveals sA on-chain)">
+      <bpmn:incoming>f_t14</bpmn:incoming>
+      <bpmn:outgoing>f_t15</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:serviceTask id="T_relay" name="Relay claim tx to OBX miners (maker mines it)">
+      <bpmn:incoming>f_t15</bpmn:incoming>
+      <bpmn:outgoing>f_t16</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:sendTask id="T_send_done" name="Send ClaimDone (courtesy latency hint)">
+      <bpmn:incoming>f_t16</bpmn:incoming>
+      <bpmn:outgoing>f_t17</bpmn:outgoing>
+    </bpmn:sendTask>
+    <bpmn:endEvent id="T_end" name="OBX claimed (taker funded)">
+      <bpmn:incoming>f_t17</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="f_t0" sourceRef="T_start" targetRef="T_par_split"/>
+    <bpmn:sequenceFlow id="f_t_mine" sourceRef="T_par_split" targetRef="T_mine"/>
+    <bpmn:sequenceFlow id="f_t_mine_end" sourceRef="T_mine" targetRef="T_end_mine"/>
+    <bpmn:sequenceFlow id="f_t1" sourceRef="T_par_split" targetRef="T_take"/>
+    <bpmn:sequenceFlow id="f_t2" sourceRef="T_take" targetRef="T_send_init"/>
+    <bpmn:sequenceFlow id="f_t3" sourceRef="T_send_init" targetRef="T_recv_mc"/>
+    <bpmn:sequenceFlow id="f_t4" sourceRef="T_recv_mc" targetRef="T_handle_mc"/>
+    <bpmn:sequenceFlow id="f_t5" sourceRef="T_handle_mc" targetRef="T_recv_funded"/>
+    <bpmn:sequenceFlow id="f_t6" sourceRef="T_recv_funded" targetRef="T_gw_sync"/>
+    <bpmn:sequenceFlow id="f_t_sync_no" name="not yet (sync lag)" sourceRef="T_gw_sync" targetRef="T_wait_sync"/>
+    <bpmn:sequenceFlow id="f_t_sync_back" sourceRef="T_wait_sync" targetRef="T_gw_sync"/>
+    <bpmn:sequenceFlow id="f_t7" name="yes" sourceRef="T_gw_sync" targetRef="T_verify"/>
+    <bpmn:sequenceFlow id="f_t8" sourceRef="T_verify" targetRef="T_gw_valid"/>
+    <bpmn:sequenceFlow id="f_t_invalid" name="mismatch" sourceRef="T_gw_valid" targetRef="T_abort"/>
+    <bpmn:sequenceFlow id="f_t_abort_end" sourceRef="T_abort" targetRef="T_end_abort"/>
+    <bpmn:sequenceFlow id="f_t9" name="valid" sourceRef="T_gw_valid" targetRef="T_lock"/>
+    <bpmn:sequenceFlow id="f_t10" sourceRef="T_lock" targetRef="T_send_locked"/>
+    <bpmn:sequenceFlow id="f_t11" sourceRef="T_send_locked" targetRef="T_build_claim"/>
+    <bpmn:sequenceFlow id="f_t12" sourceRef="T_build_claim" targetRef="T_send_claimreq"/>
+    <bpmn:sequenceFlow id="f_t13" sourceRef="T_send_claimreq" targetRef="T_recv_presig"/>
+    <bpmn:sequenceFlow id="f_t14" sourceRef="T_recv_presig" targetRef="T_finalize"/>
+    <bpmn:sequenceFlow id="f_t15" sourceRef="T_finalize" targetRef="T_relay"/>
+    <bpmn:sequenceFlow id="f_t16" sourceRef="T_relay" targetRef="T_send_done"/>
+    <bpmn:sequenceFlow id="f_t17" sourceRef="T_send_done" targetRef="T_end"/>
+  </bpmn:process>
+
+  <!-- ============================ MAKER ============================ -->
+  <bpmn:process id="Proc_Maker" isExecutable="false">
+    <bpmn:startEvent id="M_start" name="Node running (mining + auto-liquidity)">
+      <bpmn:outgoing>f_m0</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:parallelGateway id="M_par_split" name="run mining || swap">
+      <bpmn:incoming>f_m0</bpmn:incoming>
+      <bpmn:outgoing>f_m_mine</bpmn:outgoing>
+      <bpmn:outgoing>f_m1</bpmn:outgoing>
+    </bpmn:parallelGateway>
+    <bpmn:task id="M_mine" name="Mine OBX blocks (continuous, parallel) - mines the claim tx too">
+      <bpmn:incoming>f_m_mine</bpmn:incoming>
+      <bpmn:outgoing>f_m_mine_end</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:endEvent id="M_end_mine" name="(runs for node lifetime)">
+      <bpmn:incoming>f_m_mine_end</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:task id="M_post" name="Auto-post OBX-&gt;XNO offer from mining rewards">
+      <bpmn:incoming>f_m1</bpmn:incoming>
+      <bpmn:outgoing>f_m2</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:receiveTask id="M_recv_init" name="Receive Init">
+      <bpmn:incoming>f_m2</bpmn:incoming>
+      <bpmn:outgoing>f_m3</bpmn:outgoing>
+    </bpmn:receiveTask>
+    <bpmn:exclusiveGateway id="M_gw_accept" name="Matches own live offer? (full OR same-rate partial)">
+      <bpmn:incoming>f_m3</bpmn:incoming>
+      <bpmn:outgoing>f_m_drop</bpmn:outgoing>
+      <bpmn:outgoing>f_m4</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="M_end_drop" name="Dropped (no fund)">
+      <bpmn:incoming>f_m_drop</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:task id="M_reserve" name="Reserve offer liquidity (no double-fund)">
+      <bpmn:incoming>f_m4</bpmn:incoming>
+      <bpmn:outgoing>f_m5</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:sendTask id="M_send_mc" name="Send MakerCommit">
+      <bpmn:incoming>f_m5</bpmn:incoming>
+      <bpmn:outgoing>f_m6</bpmn:outgoing>
+    </bpmn:sendTask>
+    <bpmn:serviceTask id="M_fund" name="Fund OBX SwapOut on-chain (timelock = unlock height)">
+      <bpmn:incoming>f_m6</bpmn:incoming>
+      <bpmn:outgoing>f_m7</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:task id="M_confirm_fund" name="Mine SwapOut to confirmation">
+      <bpmn:incoming>f_m7</bpmn:incoming>
+      <bpmn:outgoing>f_m8</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:sendTask id="M_send_funded" name="Send Funded">
+      <bpmn:incoming>f_m8</bpmn:incoming>
+      <bpmn:outgoing>f_m9</bpmn:outgoing>
+    </bpmn:sendTask>
+    <bpmn:receiveTask id="M_recv_locked" name="Receive XNOLocked (or Abort)">
+      <bpmn:incoming>f_m9</bpmn:incoming>
+      <bpmn:outgoing>f_m10</bpmn:outgoing>
+    </bpmn:receiveTask>
+    <bpmn:serviceTask id="M_confirm_xno" name="Confirm XNO lock pays the joint account (Nano)">
+      <bpmn:incoming>f_m10</bpmn:incoming>
+      <bpmn:outgoing>f_m11</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="M_gw_xno" name="XNO lock confirmed to joint key?">
+      <bpmn:incoming>f_m11</bpmn:incoming>
+      <bpmn:outgoing>f_m_refund</bpmn:outgoing>
+      <bpmn:outgoing>f_m12</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:task id="M_refund" name="Arm OBX refund after timelock (reclaim OBX)">
+      <bpmn:incoming>f_m_refund</bpmn:incoming>
+      <bpmn:outgoing>f_m_refund_end</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:endEvent id="M_end_refund" name="Refunded">
+      <bpmn:incoming>f_m_refund_end</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:receiveTask id="M_recv_claimreq" name="Receive ClaimRequest">
+      <bpmn:incoming>f_m12</bpmn:incoming>
+      <bpmn:outgoing>f_m13</bpmn:outgoing>
+    </bpmn:receiveTask>
+    <bpmn:task id="M_cosign" name="Co-sign claim; store taker half s^_a, commit nonce">
+      <bpmn:incoming>f_m13</bpmn:incoming>
+      <bpmn:outgoing>f_m14</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:sendTask id="M_send_presig" name="Send ClaimPreSig">
+      <bpmn:incoming>f_m14</bpmn:incoming>
+      <bpmn:outgoing>f_m15</bpmn:outgoing>
+    </bpmn:sendTask>
+
+    <!-- INDEPENDENT sweep: recover sA from the chain, in parallel with the ignored relay -->
+    <bpmn:parallelGateway id="M_par_recover" name="recover INDEPENDENTLY of taker">
+      <bpmn:incoming>f_m15</bpmn:incoming>
+      <bpmn:outgoing>f_m_done_in</bpmn:outgoing>
+      <bpmn:outgoing>f_m_scrape_in</bpmn:outgoing>
+    </bpmn:parallelGateway>
+    <bpmn:receiveTask id="M_recv_done" name="(optional) Receive ClaimDone - drained &amp; ignored">
+      <bpmn:incoming>f_m_done_in</bpmn:incoming>
+      <bpmn:outgoing>f_m_done_out</bpmn:outgoing>
+    </bpmn:receiveTask>
+    <bpmn:endEvent id="M_end_hint" name="hint drained">
+      <bpmn:incoming>f_m_done_out</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:task id="M_scrape" name="Poll OBX chain for the mined claim (~1s, until found; deadline = UnlockHeight)">
+      <bpmn:incoming>f_m_scrape_in</bpmn:incoming>
+      <bpmn:outgoing>f_m16</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="M_extract" name="Extract sA = S_full - s^_a - s^_b from on-chain claim sig">
+      <bpmn:incoming>f_m16</bpmn:incoming>
+      <bpmn:outgoing>f_m17</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:serviceTask id="M_sweep" name="Sweep REAL XNO: joint -&gt; maker sweep address (Nano)">
+      <bpmn:incoming>f_m17</bpmn:incoming>
+      <bpmn:outgoing>f_m18</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="M_end" name="XNO swept (maker funded) - swap settled">
+      <bpmn:incoming>f_m18</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="f_m0" sourceRef="M_start" targetRef="M_par_split"/>
+    <bpmn:sequenceFlow id="f_m_mine" sourceRef="M_par_split" targetRef="M_mine"/>
+    <bpmn:sequenceFlow id="f_m_mine_end" sourceRef="M_mine" targetRef="M_end_mine"/>
+    <bpmn:sequenceFlow id="f_m1" sourceRef="M_par_split" targetRef="M_post"/>
+    <bpmn:sequenceFlow id="f_m2" sourceRef="M_post" targetRef="M_recv_init"/>
+    <bpmn:sequenceFlow id="f_m3" sourceRef="M_recv_init" targetRef="M_gw_accept"/>
+    <bpmn:sequenceFlow id="f_m_drop" name="no match" sourceRef="M_gw_accept" targetRef="M_end_drop"/>
+    <bpmn:sequenceFlow id="f_m4" name="accept" sourceRef="M_gw_accept" targetRef="M_reserve"/>
+    <bpmn:sequenceFlow id="f_m5" sourceRef="M_reserve" targetRef="M_send_mc"/>
+    <bpmn:sequenceFlow id="f_m6" sourceRef="M_send_mc" targetRef="M_fund"/>
+    <bpmn:sequenceFlow id="f_m7" sourceRef="M_fund" targetRef="M_confirm_fund"/>
+    <bpmn:sequenceFlow id="f_m8" sourceRef="M_confirm_fund" targetRef="M_send_funded"/>
+    <bpmn:sequenceFlow id="f_m9" sourceRef="M_send_funded" targetRef="M_recv_locked"/>
+    <bpmn:sequenceFlow id="f_m10" sourceRef="M_recv_locked" targetRef="M_confirm_xno"/>
+    <bpmn:sequenceFlow id="f_m11" sourceRef="M_confirm_xno" targetRef="M_gw_xno"/>
+    <bpmn:sequenceFlow id="f_m_refund" name="no / aborted" sourceRef="M_gw_xno" targetRef="M_refund"/>
+    <bpmn:sequenceFlow id="f_m_refund_end" sourceRef="M_refund" targetRef="M_end_refund"/>
+    <bpmn:sequenceFlow id="f_m12" name="confirmed" sourceRef="M_gw_xno" targetRef="M_recv_claimreq"/>
+    <bpmn:sequenceFlow id="f_m13" sourceRef="M_recv_claimreq" targetRef="M_cosign"/>
+    <bpmn:sequenceFlow id="f_m14" sourceRef="M_cosign" targetRef="M_send_presig"/>
+    <bpmn:sequenceFlow id="f_m15" sourceRef="M_send_presig" targetRef="M_par_recover"/>
+    <bpmn:sequenceFlow id="f_m_done_in" sourceRef="M_par_recover" targetRef="M_recv_done"/>
+    <bpmn:sequenceFlow id="f_m_done_out" sourceRef="M_recv_done" targetRef="M_end_hint"/>
+    <bpmn:sequenceFlow id="f_m_scrape_in" sourceRef="M_par_recover" targetRef="M_scrape"/>
+    <bpmn:sequenceFlow id="f_m16" sourceRef="M_scrape" targetRef="M_extract"/>
+    <bpmn:sequenceFlow id="f_m17" sourceRef="M_extract" targetRef="M_sweep"/>
+    <bpmn:sequenceFlow id="f_m18" sourceRef="M_sweep" targetRef="M_end"/>
+  </bpmn:process>
+
+  <!-- ===================== OBX chain (system pool) ===================== -->
+  <bpmn:process id="Proc_OBX" isExecutable="false">
+    <bpmn:startEvent id="OBX_start" name="mempool / miners">
+      <bpmn:outgoing>f_o0</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:task id="OBX_accept" name="Validate &amp; admit tx (fund / claim) to mempool">
+      <bpmn:incoming>f_o0</bpmn:incoming>
+      <bpmn:outgoing>f_o1</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="OBX_mine" name="Mine block; SwapOut / claim (S_full) now on-chain">
+      <bpmn:incoming>f_o1</bpmn:incoming>
+      <bpmn:outgoing>f_o2</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:endEvent id="OBX_end" name="block sealed">
+      <bpmn:incoming>f_o2</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="f_o0" sourceRef="OBX_start" targetRef="OBX_accept"/>
+    <bpmn:sequenceFlow id="f_o1" sourceRef="OBX_accept" targetRef="OBX_mine"/>
+    <bpmn:sequenceFlow id="f_o2" sourceRef="OBX_mine" targetRef="OBX_end"/>
+  </bpmn:process>
+
+  <!-- ===================== Nano / XNO (system pool) ===================== -->
+  <bpmn:process id="Proc_XNO" isExecutable="false">
+    <bpmn:startEvent id="XNO_start" name="Nano RPC (default rainstorm)">
+      <bpmn:outgoing>f_x0</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:task id="XNO_recv" name="Process state blocks (lock to joint / sweep to maker)">
+      <bpmn:incoming>f_x0</bpmn:incoming>
+      <bpmn:outgoing>f_x1</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:endEvent id="XNO_end" name="confirmed (cemented)">
+      <bpmn:incoming>f_x1</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="f_x0" sourceRef="XNO_start" targetRef="XNO_recv"/>
+    <bpmn:sequenceFlow id="f_x1" sourceRef="XNO_recv" targetRef="XNO_end"/>
+  </bpmn:process>
+
+  <!-- ============================ DIAGRAM ============================ -->
+  <bpmndi:BPMNDiagram id="Diagram_1">
+    <bpmndi:BPMNPlane id="Plane_1" bpmnElement="Collab_Swap">
+
+      <bpmndi:BPMNShape id="di_Part_Taker" bpmnElement="Part_Taker" isHorizontal="true">
+        <dc:Bounds x="160" y="80" width="2560" height="240"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_Part_Maker" bpmnElement="Part_Maker" isHorizontal="true">
+        <dc:Bounds x="160" y="340" width="2560" height="320"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_Part_OBX" bpmnElement="Part_OBX" isHorizontal="true">
+        <dc:Bounds x="160" y="680" width="2560" height="120"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_Part_XNO" bpmnElement="Part_XNO" isHorizontal="true">
+        <dc:Bounds x="160" y="820" width="2560" height="120"/>
+      </bpmndi:BPMNShape>
+
+      <!-- Taker shapes -->
+      <bpmndi:BPMNShape id="di_T_start" bpmnElement="T_start"><dc:Bounds x="232" y="182" width="36" height="36"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_par_split" bpmnElement="T_par_split"><dc:Bounds x="312" y="178" width="44" height="44"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_mine" bpmnElement="T_mine"><dc:Bounds x="300" y="92" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_end_mine" bpmnElement="T_end_mine"><dc:Bounds x="452" y="106" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_take" bpmnElement="T_take"><dc:Bounds x="400" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_send_init" bpmnElement="T_send_init"><dc:Bounds x="560" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_recv_mc" bpmnElement="T_recv_mc"><dc:Bounds x="720" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_handle_mc" bpmnElement="T_handle_mc"><dc:Bounds x="880" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_recv_funded" bpmnElement="T_recv_funded"><dc:Bounds x="1040" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_gw_sync" bpmnElement="T_gw_sync"><dc:Bounds x="1200" y="178" width="44" height="44"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_wait_sync" bpmnElement="T_wait_sync"><dc:Bounds x="1160" y="92" width="120" height="50"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_verify" bpmnElement="T_verify"><dc:Bounds x="1290" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_gw_valid" bpmnElement="T_gw_valid"><dc:Bounds x="1450" y="178" width="44" height="44"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_abort" bpmnElement="T_abort"><dc:Bounds x="1412" y="248" width="120" height="50"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_end_abort" bpmnElement="T_end_abort"><dc:Bounds x="1556" y="258" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_lock" bpmnElement="T_lock"><dc:Bounds x="1540" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_send_locked" bpmnElement="T_send_locked"><dc:Bounds x="1700" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_build_claim" bpmnElement="T_build_claim"><dc:Bounds x="1860" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_send_claimreq" bpmnElement="T_send_claimreq"><dc:Bounds x="2020" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_recv_presig" bpmnElement="T_recv_presig"><dc:Bounds x="2180" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_finalize" bpmnElement="T_finalize"><dc:Bounds x="2340" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_relay" bpmnElement="T_relay"><dc:Bounds x="2500" y="170" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_send_done" bpmnElement="T_send_done"><dc:Bounds x="2500" y="92" width="120" height="50"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_T_end" bpmnElement="T_end"><dc:Bounds x="2652" y="184" width="32" height="32"/></bpmndi:BPMNShape>
+
+      <!-- Maker shapes -->
+      <bpmndi:BPMNShape id="di_M_start" bpmnElement="M_start"><dc:Bounds x="232" y="470" width="36" height="36"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_par_split" bpmnElement="M_par_split"><dc:Bounds x="312" y="466" width="44" height="44"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_mine" bpmnElement="M_mine"><dc:Bounds x="300" y="360" width="160" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_end_mine" bpmnElement="M_end_mine"><dc:Bounds x="492" y="374" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_post" bpmnElement="M_post"><dc:Bounds x="400" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_recv_init" bpmnElement="M_recv_init"><dc:Bounds x="560" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_gw_accept" bpmnElement="M_gw_accept"><dc:Bounds x="720" y="466" width="44" height="44"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_end_drop" bpmnElement="M_end_drop"><dc:Bounds x="726" y="392" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_reserve" bpmnElement="M_reserve"><dc:Bounds x="800" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_send_mc" bpmnElement="M_send_mc"><dc:Bounds x="960" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_fund" bpmnElement="M_fund"><dc:Bounds x="1120" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_confirm_fund" bpmnElement="M_confirm_fund"><dc:Bounds x="1280" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_send_funded" bpmnElement="M_send_funded"><dc:Bounds x="1440" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_recv_locked" bpmnElement="M_recv_locked"><dc:Bounds x="1600" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_confirm_xno" bpmnElement="M_confirm_xno"><dc:Bounds x="1760" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_gw_xno" bpmnElement="M_gw_xno"><dc:Bounds x="1920" y="466" width="44" height="44"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_refund" bpmnElement="M_refund"><dc:Bounds x="1880" y="572" width="120" height="50"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_end_refund" bpmnElement="M_end_refund"><dc:Bounds x="2024" y="582" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_recv_claimreq" bpmnElement="M_recv_claimreq"><dc:Bounds x="2010" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_cosign" bpmnElement="M_cosign"><dc:Bounds x="2170" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_send_presig" bpmnElement="M_send_presig"><dc:Bounds x="2330" y="458" width="120" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_par_recover" bpmnElement="M_par_recover"><dc:Bounds x="2490" y="466" width="44" height="44"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_recv_done" bpmnElement="M_recv_done"><dc:Bounds x="2450" y="360" width="140" height="50"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_end_hint" bpmnElement="M_end_hint"><dc:Bounds x="2614" y="370" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_scrape" bpmnElement="M_scrape"><dc:Bounds x="2450" y="540" width="140" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_extract" bpmnElement="M_extract"><dc:Bounds x="2450" y="610" width="140" height="40"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_sweep" bpmnElement="M_sweep"><dc:Bounds x="2620" y="540" width="80" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_M_end" bpmnElement="M_end"><dc:Bounds x="2640" y="610" width="36" height="36"/></bpmndi:BPMNShape>
+
+      <!-- OBX chain shapes -->
+      <bpmndi:BPMNShape id="di_OBX_start" bpmnElement="OBX_start"><dc:Bounds x="1140" y="722" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_OBX_accept" bpmnElement="OBX_accept"><dc:Bounds x="1220" y="708" width="160" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_OBX_mine" bpmnElement="OBX_mine"><dc:Bounds x="2460" y="708" width="180" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_OBX_end" bpmnElement="OBX_end"><dc:Bounds x="2670" y="722" width="32" height="32"/></bpmndi:BPMNShape>
+
+      <!-- XNO shapes -->
+      <bpmndi:BPMNShape id="di_XNO_start" bpmnElement="XNO_start"><dc:Bounds x="1540" y="862" width="32" height="32"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_XNO_recv" bpmnElement="XNO_recv"><dc:Bounds x="1620" y="848" width="220" height="60"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="di_XNO_end" bpmnElement="XNO_end"><dc:Bounds x="1880" y="862" width="32" height="32"/></bpmndi:BPMNShape>
+
+      <!-- Taker edges -->
+      <bpmndi:BPMNEdge id="di_f_t0" bpmnElement="f_t0"><di:waypoint x="268" y="200"/><di:waypoint x="312" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t_mine" bpmnElement="f_t_mine"><di:waypoint x="334" y="178"/><di:waypoint x="334" y="152"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t_mine_end" bpmnElement="f_t_mine_end"><di:waypoint x="420" y="122"/><di:waypoint x="452" y="122"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t1" bpmnElement="f_t1"><di:waypoint x="356" y="200"/><di:waypoint x="400" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t2" bpmnElement="f_t2"><di:waypoint x="520" y="200"/><di:waypoint x="560" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t3" bpmnElement="f_t3"><di:waypoint x="680" y="200"/><di:waypoint x="720" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t4" bpmnElement="f_t4"><di:waypoint x="840" y="200"/><di:waypoint x="880" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t5" bpmnElement="f_t5"><di:waypoint x="1000" y="200"/><di:waypoint x="1040" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t6" bpmnElement="f_t6"><di:waypoint x="1160" y="200"/><di:waypoint x="1200" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t_sync_no" bpmnElement="f_t_sync_no"><di:waypoint x="1222" y="178"/><di:waypoint x="1222" y="142"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t_sync_back" bpmnElement="f_t_sync_back"><di:waypoint x="1200" y="117"/><di:waypoint x="1180" y="117"/><di:waypoint x="1180" y="190"/><di:waypoint x="1200" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t7" bpmnElement="f_t7"><di:waypoint x="1244" y="200"/><di:waypoint x="1290" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t8" bpmnElement="f_t8"><di:waypoint x="1410" y="200"/><di:waypoint x="1450" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t_invalid" bpmnElement="f_t_invalid"><di:waypoint x="1472" y="222"/><di:waypoint x="1472" y="248"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t_abort_end" bpmnElement="f_t_abort_end"><di:waypoint x="1532" y="273"/><di:waypoint x="1556" y="273"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t9" bpmnElement="f_t9"><di:waypoint x="1494" y="200"/><di:waypoint x="1540" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t10" bpmnElement="f_t10"><di:waypoint x="1660" y="200"/><di:waypoint x="1700" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t11" bpmnElement="f_t11"><di:waypoint x="1820" y="200"/><di:waypoint x="1860" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t12" bpmnElement="f_t12"><di:waypoint x="1980" y="200"/><di:waypoint x="2020" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t13" bpmnElement="f_t13"><di:waypoint x="2140" y="200"/><di:waypoint x="2180" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t14" bpmnElement="f_t14"><di:waypoint x="2300" y="200"/><di:waypoint x="2340" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t15" bpmnElement="f_t15"><di:waypoint x="2460" y="200"/><di:waypoint x="2500" y="200"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t16" bpmnElement="f_t16"><di:waypoint x="2560" y="170"/><di:waypoint x="2560" y="142"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_t17" bpmnElement="f_t17"><di:waypoint x="2620" y="117"/><di:waypoint x="2668" y="117"/><di:waypoint x="2668" y="184"/></bpmndi:BPMNEdge>
+
+      <!-- Maker edges -->
+      <bpmndi:BPMNEdge id="di_f_m0" bpmnElement="f_m0"><di:waypoint x="268" y="488"/><di:waypoint x="312" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_mine" bpmnElement="f_m_mine"><di:waypoint x="334" y="466"/><di:waypoint x="334" y="420"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_mine_end" bpmnElement="f_m_mine_end"><di:waypoint x="460" y="390"/><di:waypoint x="492" y="390"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m1" bpmnElement="f_m1"><di:waypoint x="356" y="488"/><di:waypoint x="400" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m2" bpmnElement="f_m2"><di:waypoint x="520" y="488"/><di:waypoint x="560" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m3" bpmnElement="f_m3"><di:waypoint x="680" y="488"/><di:waypoint x="720" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_drop" bpmnElement="f_m_drop"><di:waypoint x="742" y="466"/><di:waypoint x="742" y="424"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m4" bpmnElement="f_m4"><di:waypoint x="764" y="488"/><di:waypoint x="800" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m5" bpmnElement="f_m5"><di:waypoint x="920" y="488"/><di:waypoint x="960" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m6" bpmnElement="f_m6"><di:waypoint x="1080" y="488"/><di:waypoint x="1120" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m7" bpmnElement="f_m7"><di:waypoint x="1240" y="488"/><di:waypoint x="1280" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m8" bpmnElement="f_m8"><di:waypoint x="1400" y="488"/><di:waypoint x="1440" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m9" bpmnElement="f_m9"><di:waypoint x="1560" y="488"/><di:waypoint x="1600" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m10" bpmnElement="f_m10"><di:waypoint x="1720" y="488"/><di:waypoint x="1760" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m11" bpmnElement="f_m11"><di:waypoint x="1880" y="488"/><di:waypoint x="1920" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_refund" bpmnElement="f_m_refund"><di:waypoint x="1942" y="510"/><di:waypoint x="1942" y="572"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_refund_end" bpmnElement="f_m_refund_end"><di:waypoint x="2000" y="597"/><di:waypoint x="2024" y="597"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m12" bpmnElement="f_m12"><di:waypoint x="1964" y="488"/><di:waypoint x="2010" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m13" bpmnElement="f_m13"><di:waypoint x="2130" y="488"/><di:waypoint x="2170" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m14" bpmnElement="f_m14"><di:waypoint x="2290" y="488"/><di:waypoint x="2330" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m15" bpmnElement="f_m15"><di:waypoint x="2450" y="488"/><di:waypoint x="2490" y="488"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_done_in" bpmnElement="f_m_done_in"><di:waypoint x="2512" y="466"/><di:waypoint x="2512" y="410"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_done_out" bpmnElement="f_m_done_out"><di:waypoint x="2590" y="385"/><di:waypoint x="2614" y="385"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m_scrape_in" bpmnElement="f_m_scrape_in"><di:waypoint x="2512" y="510"/><di:waypoint x="2512" y="540"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m16" bpmnElement="f_m16"><di:waypoint x="2520" y="600"/><di:waypoint x="2520" y="610"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m17" bpmnElement="f_m17"><di:waypoint x="2590" y="630"/><di:waypoint x="2660" y="630"/><di:waypoint x="2660" y="600"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_m18" bpmnElement="f_m18"><di:waypoint x="2660" y="600"/><di:waypoint x="2658" y="610"/></bpmndi:BPMNEdge>
+
+      <!-- OBX chain edges -->
+      <bpmndi:BPMNEdge id="di_f_o0" bpmnElement="f_o0"><di:waypoint x="1172" y="738"/><di:waypoint x="1220" y="738"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_o1" bpmnElement="f_o1"><di:waypoint x="1380" y="738"/><di:waypoint x="2460" y="738"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_o2" bpmnElement="f_o2"><di:waypoint x="2640" y="738"/><di:waypoint x="2670" y="738"/></bpmndi:BPMNEdge>
+
+      <!-- XNO edges -->
+      <bpmndi:BPMNEdge id="di_f_x0" bpmnElement="f_x0"><di:waypoint x="1572" y="878"/><di:waypoint x="1620" y="878"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_f_x1" bpmnElement="f_x1"><di:waypoint x="1840" y="878"/><di:waypoint x="1880" y="878"/></bpmndi:BPMNEdge>
+
+      <!-- message flows -->
+      <bpmndi:BPMNEdge id="di_MF_Init" bpmnElement="MF_Init"><di:waypoint x="620" y="230"/><di:waypoint x="620" y="458"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_MakerCommit" bpmnElement="MF_MakerCommit"><di:waypoint x="1020" y="458"/><di:waypoint x="800" y="230"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_Funded" bpmnElement="MF_Funded"><di:waypoint x="1500" y="458"/><di:waypoint x="1100" y="230"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_XNOLocked" bpmnElement="MF_XNOLocked"><di:waypoint x="1760" y="230"/><di:waypoint x="1660" y="458"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_ClaimReq" bpmnElement="MF_ClaimReq"><di:waypoint x="2080" y="230"/><di:waypoint x="2070" y="458"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_ClaimPreSig" bpmnElement="MF_ClaimPreSig"><di:waypoint x="2390" y="458"/><di:waypoint x="2240" y="230"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_ClaimDone" bpmnElement="MF_ClaimDone"><di:waypoint x="2560" y="142"/><di:waypoint x="2560" y="160"/><di:waypoint x="2520" y="360"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_Abort" bpmnElement="MF_Abort"><di:waypoint x="1492" y="298"/><di:waypoint x="1660" y="458"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_FundTx" bpmnElement="MF_FundTx"><di:waypoint x="1180" y="518"/><di:waypoint x="1260" y="708"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_RelayTx" bpmnElement="MF_RelayTx"><di:waypoint x="2540" y="230"/><di:waypoint x="2560" y="260"/><di:waypoint x="1340" y="708"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_ClaimMined" bpmnElement="MF_ClaimMined"><di:waypoint x="2550" y="708"/><di:waypoint x="2540" y="600"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_LockXNO" bpmnElement="MF_LockXNO"><di:waypoint x="1600" y="230"/><di:waypoint x="1700" y="848"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="di_MF_SweepXNO" bpmnElement="MF_SweepXNO"><di:waypoint x="2660" y="600"/><di:waypoint x="1820" y="848"/></bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

@@ -1,0 +1,436 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Obscura (OBX) WHOLE-PROTOCOL process model.
+
+  End-to-end transaction lifecycle, modeled as a BPMN 2.0 collaboration with one
+  pool ("Obscura Protocol") split into six lanes that mirror the codebase:
+
+    Wallet      - builds + transparently zk-STARK-proves a tx (membership +
+                  nullifier + value conservation + range), confidential amounts.
+    Mempool     - admission / fee + reorg-safe checks / nullifier reservation.
+    P2P         - Dandelion++ stem-then-fluff gossip; PEX/Tor transport.
+    Miner       - PoR-gated (must be a full synced node) PoW assembly; binds the
+                  six header roots (incl. StateRoot pre-state commitment) into the PoW preimage.
+    Validation  - every node re-verifies PoW + PoR + STARK + roots on receipt.
+    State/Chain - applies accumulator / nullifier-set / commitment-tree updates,
+                  extends the canonical (heaviest-work) chain, prunes + snapshots.
+
+  Ground truth: PoR-gated mining (PoRWindow=10000, PoRChallenges=4), transparent
+  zk-STARK proofs, class-group accumulator (no trusted setup), confidential
+  amounts (range+balance in-field), anon spend (Poseidon commitment tree +
+  nullifier AIR), pruning intrinsic (SnapshotInterval=200 + body pruning).
+-->
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  id="Defs_OBX_Protocol"
+                  targetNamespace="https://obscura.local/protocol">
+
+  <bpmn:collaboration id="Collab_OBX">
+    <bpmn:participant id="Part_OBX" name="Obscura Protocol" processRef="Proc_OBX" />
+  </bpmn:collaboration>
+
+  <bpmn:process id="Proc_OBX" isExecutable="false">
+
+    <bpmn:laneSet id="LaneSet_OBX">
+      <bpmn:lane id="Lane_Wallet" name="Wallet">
+        <bpmn:flowNodeRef>Start_Tx</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Build</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Prove</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Submit</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_Mempool" name="Mempool">
+        <bpmn:flowNodeRef>T_Admit</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>G_Admit</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>End_Reject</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Reserve</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_P2P" name="P2P">
+        <bpmn:flowNodeRef>T_Stem</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Fluff</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_Miner" name="Miner">
+        <bpmn:flowNodeRef>T_PoR</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Assemble</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Roots</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_PoW</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Broadcast</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_Validation" name="Validation">
+        <bpmn:flowNodeRef>T_VPoW</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_VPoR</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_VStark</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_VRoots</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>G_Valid</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>End_Drop</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_State" name="State/Chain">
+        <bpmn:flowNodeRef>T_Apply</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>G_Fork</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Reorg</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Extend</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>T_Prune</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>End_Canon</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+
+    <!-- Wallet -->
+    <bpmn:startEvent id="Start_Tx" name="User initiates payment">
+      <bpmn:outgoing>F01</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:task id="T_Build" name="Build tx: select notes, stealth output, confidential amounts">
+      <bpmn:incoming>F01</bpmn:incoming>
+      <bpmn:outgoing>F02</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Prove" name="Generate transparent zk-STARK: membership + recipient-secret nullifier (nf=H(nk,rho), NfPk in address: sender cannot link/steal) + conservation + range">
+      <bpmn:incoming>F02</bpmn:incoming>
+      <bpmn:outgoing>F03</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Submit" name="Submit signed tx to local node">
+      <bpmn:incoming>F03</bpmn:incoming>
+      <bpmn:outgoing>F04</bpmn:outgoing>
+    </bpmn:task>
+
+    <!-- Mempool -->
+    <bpmn:task id="T_Admit" name="Verify proof, fee, anchor, reorg-safe checks">
+      <bpmn:incoming>F04</bpmn:incoming>
+      <bpmn:outgoing>F05</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:exclusiveGateway id="G_Admit" name="Admissible?">
+      <bpmn:incoming>F05</bpmn:incoming>
+      <bpmn:outgoing>F06_no</bpmn:outgoing>
+      <bpmn:outgoing>F06_yes</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="End_Reject" name="Reject tx">
+      <bpmn:incoming>F06_no</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:task id="T_Reserve" name="Reserve nullifiers / vault keys; queue in mempool">
+      <bpmn:incoming>F06_yes</bpmn:incoming>
+      <bpmn:outgoing>F07</bpmn:outgoing>
+    </bpmn:task>
+
+    <!-- P2P -->
+    <bpmn:task id="T_Stem" name="Dandelion++ stem relay (p=0.30, embargo)">
+      <bpmn:incoming>F07</bpmn:incoming>
+      <bpmn:outgoing>F08</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Fluff" name="Fluff: broadcast to peers (PEX / Tor)">
+      <bpmn:incoming>F08</bpmn:incoming>
+      <bpmn:outgoing>F09</bpmn:outgoing>
+    </bpmn:task>
+
+    <!-- Miner -->
+    <bpmn:task id="T_PoR" name="Prove retrievability: full node holds bodies in PoRWindow (4 challenges)">
+      <bpmn:incoming>F09</bpmn:incoming>
+      <bpmn:outgoing>F10</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Assemble" name="Assemble block: select txs, apply state transition">
+      <bpmn:incoming>F10</bpmn:incoming>
+      <bpmn:outgoing>F11</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Roots" name="Compute roots: AccValue, NullRoot, CMRoot, PQAccRoot, PoRRoot, StateRoot (pre-state commitment over residual consensus state: emitted, incentivePool, disk-set + pqUtxo maps)">
+      <bpmn:incoming>F11</bpmn:incoming>
+      <bpmn:outgoing>F12</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_PoW" name="Grind memory-hard PoW over header binding all six roots; per-epoch PoW seed; LWMA target">
+      <bpmn:incoming>F12</bpmn:incoming>
+      <bpmn:outgoing>F13</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Broadcast" name="Broadcast solved block to network">
+      <bpmn:incoming>F13</bpmn:incoming>
+      <bpmn:outgoing>F14</bpmn:outgoing>
+    </bpmn:task>
+
+    <!-- Validation (every node) -->
+    <bpmn:task id="T_VPoW" name="Re-verify PoW target and header binding">
+      <bpmn:incoming>F14</bpmn:incoming>
+      <bpmn:outgoing>F15</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_VPoR" name="Verify PoR entries (header-only, no body custody needed)">
+      <bpmn:incoming>F15</bpmn:incoming>
+      <bpmn:outgoing>F16</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_VStark" name="Verify every tx zk-STARK + nullifier non-membership">
+      <bpmn:incoming>F16</bpmn:incoming>
+      <bpmn:outgoing>F17</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_VRoots" name="Recompute and match all six header roots (incl. StateRoot pre-state commitment)">
+      <bpmn:incoming>F17</bpmn:incoming>
+      <bpmn:outgoing>F18</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:exclusiveGateway id="G_Valid" name="Block valid?">
+      <bpmn:incoming>F18</bpmn:incoming>
+      <bpmn:outgoing>F19_no</bpmn:outgoing>
+      <bpmn:outgoing>F19_yes</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="End_Drop" name="Drop / ban peer">
+      <bpmn:incoming>F19_no</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- State / Chain -->
+    <bpmn:task id="T_Apply" name="Apply: accumulator add, nullifier-set insert, commitment-tree append">
+      <bpmn:incoming>F19_yes</bpmn:incoming>
+      <bpmn:outgoing>F20</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:exclusiveGateway id="G_Fork" name="Heavier fork?">
+      <bpmn:incoming>F20</bpmn:incoming>
+      <bpmn:outgoing>F21_yes</bpmn:outgoing>
+      <bpmn:outgoing>F21_no</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:task id="T_Reorg" name="Snapshot-restore + deterministic replay (bounded MaxReorgDepth)">
+      <bpmn:incoming>F21_yes</bpmn:incoming>
+      <bpmn:outgoing>F22</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Extend" name="Extend canonical heaviest-work chain; advance tip">
+      <bpmn:incoming>F21_no</bpmn:incoming>
+      <bpmn:incoming>F22</bpmn:incoming>
+      <bpmn:outgoing>F23</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="T_Prune" name="Snapshot (interval 200) + prune bodies below tip-PoRWindow">
+      <bpmn:incoming>F23</bpmn:incoming>
+      <bpmn:outgoing>F24</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:endEvent id="End_Canon" name="Tx final in canonical chain">
+      <bpmn:incoming>F24</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Sequence flows -->
+    <bpmn:sequenceFlow id="F01" sourceRef="Start_Tx" targetRef="T_Build" />
+    <bpmn:sequenceFlow id="F02" sourceRef="T_Build" targetRef="T_Prove" />
+    <bpmn:sequenceFlow id="F03" sourceRef="T_Prove" targetRef="T_Submit" />
+    <bpmn:sequenceFlow id="F04" sourceRef="T_Submit" targetRef="T_Admit" />
+    <bpmn:sequenceFlow id="F05" sourceRef="T_Admit" targetRef="G_Admit" />
+    <bpmn:sequenceFlow id="F06_no" name="no" sourceRef="G_Admit" targetRef="End_Reject" />
+    <bpmn:sequenceFlow id="F06_yes" name="yes" sourceRef="G_Admit" targetRef="T_Reserve" />
+    <bpmn:sequenceFlow id="F07" sourceRef="T_Reserve" targetRef="T_Stem" />
+    <bpmn:sequenceFlow id="F08" sourceRef="T_Stem" targetRef="T_Fluff" />
+    <bpmn:sequenceFlow id="F09" sourceRef="T_Fluff" targetRef="T_PoR" />
+    <bpmn:sequenceFlow id="F10" sourceRef="T_PoR" targetRef="T_Assemble" />
+    <bpmn:sequenceFlow id="F11" sourceRef="T_Assemble" targetRef="T_Roots" />
+    <bpmn:sequenceFlow id="F12" sourceRef="T_Roots" targetRef="T_PoW" />
+    <bpmn:sequenceFlow id="F13" sourceRef="T_PoW" targetRef="T_Broadcast" />
+    <bpmn:sequenceFlow id="F14" sourceRef="T_Broadcast" targetRef="T_VPoW" />
+    <bpmn:sequenceFlow id="F15" sourceRef="T_VPoW" targetRef="T_VPoR" />
+    <bpmn:sequenceFlow id="F16" sourceRef="T_VPoR" targetRef="T_VStark" />
+    <bpmn:sequenceFlow id="F17" sourceRef="T_VStark" targetRef="T_VRoots" />
+    <bpmn:sequenceFlow id="F18" sourceRef="T_VRoots" targetRef="G_Valid" />
+    <bpmn:sequenceFlow id="F19_no" name="invalid" sourceRef="G_Valid" targetRef="End_Drop" />
+    <bpmn:sequenceFlow id="F19_yes" name="valid" sourceRef="G_Valid" targetRef="T_Apply" />
+    <bpmn:sequenceFlow id="F20" sourceRef="T_Apply" targetRef="G_Fork" />
+    <bpmn:sequenceFlow id="F21_yes" name="yes" sourceRef="G_Fork" targetRef="T_Reorg" />
+    <bpmn:sequenceFlow id="F21_no" name="no" sourceRef="G_Fork" targetRef="T_Extend" />
+    <bpmn:sequenceFlow id="F22" sourceRef="T_Reorg" targetRef="T_Extend" />
+    <bpmn:sequenceFlow id="F23" sourceRef="T_Extend" targetRef="T_Prune" />
+    <bpmn:sequenceFlow id="F24" sourceRef="T_Prune" targetRef="End_Canon" />
+
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="Diagram_OBX">
+    <bpmndi:BPMNPlane id="Plane_OBX" bpmnElement="Collab_OBX">
+
+      <!-- Pool -->
+      <bpmndi:BPMNShape id="Shape_Part_OBX" bpmnElement="Part_OBX" isHorizontal="true">
+        <dc:Bounds x="120" y="80" width="1640" height="900" />
+      </bpmndi:BPMNShape>
+
+      <!-- Lanes -->
+      <bpmndi:BPMNShape id="Shape_Lane_Wallet" bpmnElement="Lane_Wallet" isHorizontal="true">
+        <dc:Bounds x="150" y="80" width="1610" height="150" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Lane_Mempool" bpmnElement="Lane_Mempool" isHorizontal="true">
+        <dc:Bounds x="150" y="230" width="1610" height="150" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Lane_P2P" bpmnElement="Lane_P2P" isHorizontal="true">
+        <dc:Bounds x="150" y="380" width="1610" height="130" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Lane_Miner" bpmnElement="Lane_Miner" isHorizontal="true">
+        <dc:Bounds x="150" y="510" width="1610" height="150" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Lane_Validation" bpmnElement="Lane_Validation" isHorizontal="true">
+        <dc:Bounds x="150" y="660" width="1610" height="160" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Lane_State" bpmnElement="Lane_State" isHorizontal="true">
+        <dc:Bounds x="150" y="820" width="1610" height="160" />
+      </bpmndi:BPMNShape>
+
+      <!-- Wallet shapes -->
+      <bpmndi:BPMNShape id="S_Start_Tx" bpmnElement="Start_Tx">
+        <dc:Bounds x="200" y="135" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Build" bpmnElement="T_Build">
+        <dc:Bounds x="290" y="113" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Prove" bpmnElement="T_Prove">
+        <dc:Bounds x="510" y="113" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Submit" bpmnElement="T_Submit">
+        <dc:Bounds x="730" y="113" width="160" height="80" />
+      </bpmndi:BPMNShape>
+
+      <!-- Mempool shapes -->
+      <bpmndi:BPMNShape id="S_T_Admit" bpmnElement="T_Admit">
+        <dc:Bounds x="730" y="263" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_G_Admit" bpmnElement="G_Admit" isMarkerVisible="true">
+        <dc:Bounds x="945" y="280" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_End_Reject" bpmnElement="End_Reject">
+        <dc:Bounds x="1052" y="287" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Reserve" bpmnElement="T_Reserve">
+        <dc:Bounds x="920" y="380" width="160" height="80" />
+        <bpmndi:BPMNLabel />
+      </bpmndi:BPMNShape>
+
+      <!-- P2P shapes -->
+      <bpmndi:BPMNShape id="S_T_Stem" bpmnElement="T_Stem">
+        <dc:Bounds x="700" y="400" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Fluff" bpmnElement="T_Fluff">
+        <dc:Bounds x="480" y="400" width="160" height="80" />
+      </bpmndi:BPMNShape>
+
+      <!-- Miner shapes -->
+      <bpmndi:BPMNShape id="S_T_PoR" bpmnElement="T_PoR">
+        <dc:Bounds x="260" y="530" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Assemble" bpmnElement="T_Assemble">
+        <dc:Bounds x="480" y="530" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Roots" bpmnElement="T_Roots">
+        <dc:Bounds x="700" y="530" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_PoW" bpmnElement="T_PoW">
+        <dc:Bounds x="920" y="530" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Broadcast" bpmnElement="T_Broadcast">
+        <dc:Bounds x="1140" y="530" width="160" height="80" />
+      </bpmndi:BPMNShape>
+
+      <!-- Validation shapes -->
+      <bpmndi:BPMNShape id="S_T_VPoW" bpmnElement="T_VPoW">
+        <dc:Bounds x="1140" y="690" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_VPoR" bpmnElement="T_VPoR">
+        <dc:Bounds x="920" y="690" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_VStark" bpmnElement="T_VStark">
+        <dc:Bounds x="700" y="690" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_VRoots" bpmnElement="T_VRoots">
+        <dc:Bounds x="480" y="690" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_G_Valid" bpmnElement="G_Valid" isMarkerVisible="true">
+        <dc:Bounds x="345" y="705" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_End_Drop" bpmnElement="End_Drop">
+        <dc:Bounds x="232" y="712" width="36" height="36" />
+      </bpmndi:BPMNShape>
+
+      <!-- State shapes -->
+      <bpmndi:BPMNShape id="S_T_Apply" bpmnElement="T_Apply">
+        <dc:Bounds x="290" y="850" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_G_Fork" bpmnElement="G_Fork" isMarkerVisible="true">
+        <dc:Bounds x="505" y="865" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Reorg" bpmnElement="T_Reorg">
+        <dc:Bounds x="620" y="850" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Extend" bpmnElement="T_Extend">
+        <dc:Bounds x="840" y="850" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_T_Prune" bpmnElement="T_Prune">
+        <dc:Bounds x="1060" y="850" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="S_End_Canon" bpmnElement="End_Canon">
+        <dc:Bounds x="1282" y="872" width="36" height="36" />
+      </bpmndi:BPMNShape>
+
+      <!-- Edges -->
+      <bpmndi:BPMNEdge id="E_F01" bpmnElement="F01">
+        <di:waypoint x="236" y="153" /><di:waypoint x="290" y="153" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F02" bpmnElement="F02">
+        <di:waypoint x="450" y="153" /><di:waypoint x="510" y="153" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F03" bpmnElement="F03">
+        <di:waypoint x="670" y="153" /><di:waypoint x="730" y="153" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F04" bpmnElement="F04">
+        <di:waypoint x="810" y="193" /><di:waypoint x="810" y="263" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F05" bpmnElement="F05">
+        <di:waypoint x="890" y="303" /><di:waypoint x="945" y="305" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F06_no" bpmnElement="F06_no">
+        <di:waypoint x="995" y="305" /><di:waypoint x="1052" y="305" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F06_yes" bpmnElement="F06_yes">
+        <di:waypoint x="970" y="330" /><di:waypoint x="970" y="380" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F07" bpmnElement="F07">
+        <di:waypoint x="920" y="440" /><di:waypoint x="860" y="440" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F08" bpmnElement="F08">
+        <di:waypoint x="700" y="440" /><di:waypoint x="640" y="440" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F09" bpmnElement="F09">
+        <di:waypoint x="560" y="480" /><di:waypoint x="560" y="510" /><di:waypoint x="340" y="510" /><di:waypoint x="340" y="530" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F10" bpmnElement="F10">
+        <di:waypoint x="420" y="570" /><di:waypoint x="480" y="570" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F11" bpmnElement="F11">
+        <di:waypoint x="640" y="570" /><di:waypoint x="700" y="570" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F12" bpmnElement="F12">
+        <di:waypoint x="860" y="570" /><di:waypoint x="920" y="570" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F13" bpmnElement="F13">
+        <di:waypoint x="1080" y="570" /><di:waypoint x="1140" y="570" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F14" bpmnElement="F14">
+        <di:waypoint x="1220" y="610" /><di:waypoint x="1220" y="690" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F15" bpmnElement="F15">
+        <di:waypoint x="1140" y="730" /><di:waypoint x="1080" y="730" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F16" bpmnElement="F16">
+        <di:waypoint x="920" y="730" /><di:waypoint x="860" y="730" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F17" bpmnElement="F17">
+        <di:waypoint x="700" y="730" /><di:waypoint x="640" y="730" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F18" bpmnElement="F18">
+        <di:waypoint x="480" y="730" /><di:waypoint x="395" y="730" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F19_no" bpmnElement="F19_no">
+        <di:waypoint x="345" y="730" /><di:waypoint x="268" y="730" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F19_yes" bpmnElement="F19_yes">
+        <di:waypoint x="370" y="755" /><di:waypoint x="370" y="850" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F20" bpmnElement="F20">
+        <di:waypoint x="450" y="890" /><di:waypoint x="505" y="890" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F21_yes" bpmnElement="F21_yes">
+        <di:waypoint x="555" y="890" /><di:waypoint x="620" y="890" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F21_no" bpmnElement="F21_no">
+        <di:waypoint x="530" y="915" /><di:waypoint x="530" y="960" /><di:waypoint x="920" y="960" /><di:waypoint x="920" y="930" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F22" bpmnElement="F22">
+        <di:waypoint x="780" y="890" /><di:waypoint x="840" y="890" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F23" bpmnElement="F23">
+        <di:waypoint x="1000" y="890" /><di:waypoint x="1060" y="890" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E_F24" bpmnElement="F24">
+        <di:waypoint x="1220" y="890" /><di:waypoint x="1282" y="890" />
+      </bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

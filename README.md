@@ -70,7 +70,7 @@ flowchart TB
   extend --> prune --> canon
 ```
 
-*(This is the full whole-protocol BPMN model; a source-editable BPMN 2.0 file ships in the desktop/download bundle and the [whitepaper](https://obscura-protocol.space/whitepaper).)*
+*(A source-editable BPMN 2.0 version of this whole-protocol model is provided at [`docs/OBX_protocol.bpmn`](docs/OBX_protocol.bpmn); the atomic-swap process is at [`docs/OBX_XNO_atomic_swap.bpmn`](docs/OBX_XNO_atomic_swap.bpmn).)*
 
 ## Download & run
 
