@@ -6,10 +6,10 @@
 # restarts it. Your wallet/miner keys live in %USERPROFILE%\.obscura and are NEVER
 # touched by an upgrade — only the program binary is replaced.
 #
-#   iwr -useb https://obscura-blush.vercel.app/install.ps1 | iex
+#   iwr -useb https://obscura-protocol.space/install.ps1 | iex
 #
 # Pass node flags via $NodeArgs (defaults: --mine --seeds <mainnet seeds>):
-#   & ([scriptblock]::Create((iwr -useb https://obscura-blush.vercel.app/install.ps1))) --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
+#   & ([scriptblock]::Create((iwr -useb https://obscura-protocol.space/install.ps1))) --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
 #
 # PRIVACY: the node hides your real IP by default — it auto-starts Tor and routes
 # all P2P over a hidden service (no setup needed). This installer best-effort
@@ -42,7 +42,7 @@ function Ensure-Tor {
 # release at github.com/obscura-node/obscura — only point $Base there once that
 # release actually EXISTS at the obscura-node org.
 $Tag  = 'v1.0.0'
-$Base = 'https://obscura-blush.vercel.app/releases'
+$Base = 'https://obscura-protocol.space/releases'
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
 $Asset = "Obscura-windows-$Arch.zip"
 $Dir   = "Obscura-windows-$Arch"

@@ -7,10 +7,10 @@
 # restarts it. Your wallet/miner keys live in ~/.obscura and are NEVER touched by
 # an upgrade — only the program binary is replaced.
 #
-#   curl -fsSL https://obscura-blush.vercel.app/install.sh | sh
+#   curl -fsSL https://obscura-protocol.space/install.sh | sh
 #
 # Pass node flags after `-s --` (defaults: --mine --seeds <mainnet seeds>):
-#   curl -fsSL https://obscura-blush.vercel.app/install.sh | sh -s -- --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
+#   curl -fsSL https://obscura-protocol.space/install.sh | sh -s -- --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
 #
 # PRIVACY: the node hides your real IP by default — it auto-starts Tor and routes
 # all P2P over a hidden service (no setup needed). This installer best-effort
@@ -41,7 +41,7 @@ ensure_tor() {
 # (https://github.com/obscura-node/obscura/releases/download/v1.0.0). Only point
 # BASE there once that release actually EXISTS at the obscura-node org.
 TAG="v1.0.0"
-BASE="https://obscura-blush.vercel.app/releases"
+BASE="https://obscura-protocol.space/releases"
 DATADIR="${OBX_DATADIR:-$HOME/.obscura}"
 MARKER="$DATADIR/.installed-sha"
 DEFAULT_ARGS="--mine --seeds 139.59.183.15:18080,188.166.153.86:18080"

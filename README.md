@@ -14,77 +14,90 @@ Obscura hides every spend among the **entire** unspent-output set: a zero-knowle
 
 ```mermaid
 flowchart TB
+  subgraph Wallet
+    start(["User initiates payment"])
+    build["Build tx: notes, stealth output, confidential amounts"]
+    prove["Generate transparent zk-STARK: membership + recipient-secret nullifier (nf=H(nk,rho); sender cannot link) + conservation + range"]
+    submit["Submit signed tx to local node"]
+  end
 
-subgraph WAL["WALLET · build and prove"]
-  direction LR
-  W1["Transparent<br/>Pedersen + Schnorr"]:::wal
-  W2["Confidential ZK<br/>hidden amounts"]:::wal
-  W3["Unlinkable<br/>recipient-secret nullifier"]:::wal
-  W4["zk-STARK anon spend<br/>transparent · no trusted setup"]:::wal
-  W5["Vault<br/>private staking"]:::wal
-  W6["Cross-chain swaps<br/>XNO scriptless"]:::wal
-  W7["Post-quantum<br/>ML-KEM-768 stealth"]:::wal
-end
+  subgraph Mempool
+    admit["Verify proof, fee, anchor, reorg-safe checks"]
+    gadmit{"Admissible?"}
+    reject(["Reject tx"])
+    reserve["Reserve nullifiers / vault keys; queue"]
+  end
 
-subgraph P2P["P2P MESH · censorship-resistant"]
-  direction LR
-  N1["Self-discovering<br/>PEX + addr-me"]:::net
-  N2["Eclipse-resistant<br/>/16 group caps"]:::net
-  N3["Tor · .onion<br/>Dandelion++"]:::net
-end
+  subgraph P2P
+    stem["Dandelion++ stem relay (p=0.30, embargo)"]
+    fluff["Fluff: broadcast to peers (PEX / Tor)"]
+  end
 
-subgraph MIN["MINER · full node by protocol"]
-  direction LR
-  R1["Proof-of-Retrievability"]:::min
-  R2["Memory-hard RandomX PoW"]:::min
-end
+  subgraph Miner
+    por["Prove retrievability: full node holds bodies in PoRWindow (8 challenges)"]
+    assemble["Assemble block: select txs, apply state transition"]
+    roots["Compute roots: AccValue, NullRoot, CMRoot, PQAccRoot, PoRRoot, StateRoot (pre-state)"]
+    pow["Grind memory-hard PoW over header binding all 6 roots; epoch PoW seed; LWMA"]
+    bcast["Broadcast solved block"]
+  end
 
-subgraph ST["STATE · constant-size, committed"]
-  direction LR
-  S1[("Class-group accumulator<br/>all coins · constant-size")]:::sta
-  S2[("Nullifier set")]:::sta
-  S3[("Epoch-sharded Poseidon tree")]:::sta
-  S5[("Vaults · swaps · incentive pool")]:::sta
-end
+  subgraph Validation
+    vpow["Re-verify PoW target + header binding"]
+    vpor["Verify PoR entries (header-only)"]
+    vstark["Verify each tx zk-STARK + nullifier non-membership"]
+    vroots["Recompute and match all 6 header roots (incl. StateRoot)"]
+    gvalid{"Block valid?"}
+    drop(["Drop / ban peer"])
+  end
 
-CH[("CANONICAL CHAIN")]:::sta
+  subgraph StateChain["State/Chain"]
+    apply["Apply: accumulator add, nullifier insert, commitment-tree append"]
+    gfork{"Heavier fork?"}
+    reorg["Snapshot-restore + deterministic replay (bounded)"]
+    extend["Extend canonical heaviest-work chain; advance tip"]
+    prune["Snapshot (interval 200) + prune bodies below tip-PoRWindow"]
+    canon(["Tx final in canonical chain"])
+  end
 
-WAL ==>|"signed tx + STARK proof"| P2P
-P2P ==>|"Dandelion++ gossip"| MIN
-MIN ==>|"mined block"| ST
-ST ==>|"5 roots, PoW-bound header"| CH
-CH -.->|"broadcast"| P2P
-S3 -.->|"spend anchor"| W2
-
-classDef wal fill:#08313a,stroke:#00e6c3,color:#dffbf5;
-classDef net fill:#1e1640,stroke:#8b6cff,color:#ece7ff;
-classDef min fill:#3a1426,stroke:#ff7ad9,color:#ffe6f6;
-classDef sta fill:#3a2e0b,stroke:#ffc15e,color:#fff3dc;
+  start --> build --> prove --> submit --> admit --> gadmit
+  gadmit -->|no| reject
+  gadmit -->|yes| reserve --> stem --> fluff --> por --> assemble --> roots --> pow --> bcast
+  bcast --> vpow --> vpor --> vstark --> vroots --> gvalid
+  gvalid -->|invalid| drop
+  gvalid -->|valid| apply --> gfork
+  gfork -->|yes| reorg --> extend
+  gfork -->|no| extend
+  extend --> prune --> canon
 ```
+
+*(This is the full whole-protocol BPMN model; a source-editable BPMN 2.0 file ships in the desktop/download bundle and the [whitepaper](https://obscura-protocol.space/whitepaper).)*
 
 ## Download & run
 
-Get a build for your platform from the **[v1.0.0 release](https://github.com/dhyabi2/obscura/releases/tag/v1.0.0)** (verify against [RELEASES.md](RELEASES.md) checksums). Or install + run a full node + miner in one command — **re-run the same line any time to upgrade** (it verifies the new build's SHA-256, replaces only the binary, and keeps your keys in `~/.obscura`):
+Install + run a full node + miner in one command — **re-run the same line any time to upgrade** (it verifies the new build's SHA-256, replaces only the binary, and keeps your keys in `~/.obscura`):
 
 ```sh
 # Linux / macOS
-curl -fsSL https://obscura-blush.vercel.app/install.sh | sh
+curl -fsSL https://obscura-protocol.space/install.sh | sh
 
 # Windows (PowerShell)
-iwr -useb https://obscura-blush.vercel.app/install.ps1 | iex
+iwr -useb https://obscura-protocol.space/install.ps1 | iex
 ```
 
-For a desktop wallet + swaps + mining in a window, unzip the macOS/Windows/Linux build and open it.
+Or grab a build from the **[GitHub releases](https://github.com/obscura-node/obscura/releases)** or the [download page](https://obscura-protocol.space/download) and verify it against [RELEASES.md](RELEASES.md) checksums. For a desktop wallet + swaps + mining in a window, unzip the macOS/Windows/Linux build and open it.
+
+**Privacy by default (Tor).** The node routes its P2P over **Tor automatically** — on startup it launches a `tor` hidden service and runs *onion-only*, so peers see only your `.onion`, never your home IP (ideal for mining from home). It needs a `tor` binary on `PATH` (the installer sets this up); if tor is missing it fails closed rather than leaking your IP. Pass `--clearnet` to run as a public clearnet node instead (for seed/public nodes and CI). Details: <https://obscura-protocol.space/docs/cli>.
 
 ## Links
 
-- **Website** — https://obscura-blush.vercel.app
-- **Whitepaper** — https://obscura-blush.vercel.app/whitepaper
-- **Docs** — [docs/](docs/) · https://obscura-blush.vercel.app/docs.html
+- **Website** — https://obscura-protocol.space
+- **Whitepaper** — https://obscura-protocol.space/whitepaper
+- **Docs** — https://obscura-protocol.space/docs.html (CLI: /docs/cli · API: /docs/api)
+- **Source** — https://github.com/obscura-node/obscura
 
 ## Status & disclaimer
 
-New, novel software running a **live mainnet**. An in-house four-track security review (~100 findings remediated) was performed; there is **no external third-party audit yet**, and the accumulator-based sender-anonymity ZK spend is an experimental layer still being hardened. Understand the software before committing value to it.
+New, novel software running a **live mainnet**. Understand the software before committing value to it.
 
 ## License
 

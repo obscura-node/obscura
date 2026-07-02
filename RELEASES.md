@@ -5,8 +5,8 @@ Canonical (KAT-verified) RandomX PoW. Built from this repository.
 
 ## Downloads
 
-Download the binaries from the website: <https://obscura-blush.vercel.app/download>
-(direct files under `https://obscura-blush.vercel.app/releases/…` — they deploy with
+Download the binaries from the website: <https://obscura-protocol.space/download>
+(direct files under `https://obscura-protocol.space/releases/…` — they deploy with
 the site, so they always exist). Mirror: the
 [GitHub release v1.0.0](https://github.com/obscura-node/obscura/releases/tag/v1.0.0)
 at the public `obscura-node` org (use it only once that release is actually published there).
@@ -18,32 +18,32 @@ restarts — your keys in `~/.obscura` (Windows: `%USERPROFILE%\.obscura`) are u
 
 ```sh
 # Linux / macOS
-curl -fsSL https://obscura-blush.vercel.app/install.sh | sh
+curl -fsSL https://obscura-protocol.space/install.sh | sh
 
 # Windows (PowerShell)
-iwr -useb https://obscura-blush.vercel.app/install.ps1 | iex
+iwr -useb https://obscura-protocol.space/install.ps1 | iex
 ```
 
 Manual alternative (no upgrade logic):
 
 ```sh
-curl -fL https://obscura-blush.vercel.app/releases/Obscura-linux-amd64.tar.gz | tar xz \
+curl -fL https://obscura-protocol.space/releases/Obscura-linux-amd64.tar.gz | tar xz \
   && ./Obscura-linux-amd64/obscura-node --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
 ```
 
 | Platform | File |
 | --- | --- |
-| macOS (Apple Silicon) | [`Obscura-darwin-arm64.zip`](https://obscura-blush.vercel.app/releases/Obscura-darwin-arm64.zip) |
-| macOS (Intel) | [`Obscura-darwin-amd64.zip`](https://obscura-blush.vercel.app/releases/Obscura-darwin-amd64.zip) |
-| Linux (x86-64) | [`Obscura-linux-amd64.tar.gz`](https://obscura-blush.vercel.app/releases/Obscura-linux-amd64.tar.gz) |
-| Linux (ARM64) | [`Obscura-linux-arm64.tar.gz`](https://obscura-blush.vercel.app/releases/Obscura-linux-arm64.tar.gz) |
-| Windows (x86-64) | [`Obscura-windows-amd64.zip`](https://obscura-blush.vercel.app/releases/Obscura-windows-amd64.zip) |
-| Windows (ARM64) | [`Obscura-windows-arm64.zip`](https://obscura-blush.vercel.app/releases/Obscura-windows-arm64.zip) |
+| macOS (Apple Silicon) | [`Obscura-darwin-arm64.zip`](https://obscura-protocol.space/releases/Obscura-darwin-arm64.zip) |
+| macOS (Intel) | [`Obscura-darwin-amd64.zip`](https://obscura-protocol.space/releases/Obscura-darwin-amd64.zip) |
+| Linux (x86-64) | [`Obscura-linux-amd64.tar.gz`](https://obscura-protocol.space/releases/Obscura-linux-amd64.tar.gz) |
+| Linux (ARM64) | [`Obscura-linux-arm64.tar.gz`](https://obscura-protocol.space/releases/Obscura-linux-arm64.tar.gz) |
+| Windows (x86-64) | [`Obscura-windows-amd64.zip`](https://obscura-protocol.space/releases/Obscura-windows-amd64.zip) |
+| Windows (ARM64) | [`Obscura-windows-arm64.zip`](https://obscura-protocol.space/releases/Obscura-windows-arm64.zip) |
 
 ## SHA-256 checksums
 
 Verify your download before running it (`shasum -a 256 -c SHA256SUMS.txt`; also
-published at <https://obscura-blush.vercel.app/releases/SHA256SUMS.txt>):
+published at <https://obscura-protocol.space/releases/SHA256SUMS.txt>):
 
 ```
 281dedbc5ec6806f1a4ebab0d65bf5e8a6acd00470e562d3469134b074340e4d  Obscura-darwin-amd64.zip
