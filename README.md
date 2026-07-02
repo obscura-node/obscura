@@ -95,10 +95,6 @@ Or grab a build from the **[GitHub releases](https://github.com/obscura-node/obs
 - **Docs** — https://obscura-protocol.space/docs.html (CLI: /docs/cli · API: /docs/api)
 - **Source** — https://github.com/obscura-node/obscura
 
-## Status & disclaimer
-
-New, novel software running a **live mainnet**. Understand the software before committing value to it.
-
 ## License
 
 See [LICENSE](LICENSE).
