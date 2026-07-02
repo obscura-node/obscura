@@ -1,0 +1,49 @@
+# 4-node Obscura load-test network.
+#   node0 — sole miner (mines coinbase to the loadgen wallet $MINE_ADDR) + seed.
+#   node1..3 — validate, relay, and serve RPC (sync from node0).
+# The loadgen (on the host) submits confidential txs round-robin to all four
+# RPC endpoints (28081..28084), exercising mempool gossip + validation under load.
+#
+# OBX_TARGET_BLOCK_TIME lowers the block interval for a fast devnet (consensus
+# param — identical on every node). --coinbase-maturity 1 lets coinbase be spent
+# the next block so the loadgen can recycle rewards into transactions.
+
+x-common: &common
+  build: .
+  image: obscura-node:loadtest
+  environment:
+    OBX_TARGET_BLOCK_TIME: "2"
+    # Peg PoW difficulty for steady block production on a CPU-contended host
+    # (single-thread RandomX hashrate is too variable for LWMA to converge here).
+    # Low value -> faster blocks -> higher confirm throughput for the load test.
+    OBX_FIXED_DIFFICULTY: "256"
+  networks: [obxnet]
+  restart: "no"
+
+services:
+  node0:
+    <<: *common
+    command: ["--datadir","/data","--p2p","0.0.0.0:18080","--rpc","0.0.0.0:18081","--mine","--mine-address","${MINE_ADDR}","--coinbase-maturity","1"]
+    ports: ["28081:18081"]
+
+  node1:
+    <<: *common
+    command: ["--datadir","/data","--p2p","0.0.0.0:18080","--rpc","0.0.0.0:18081","--seeds","node0:18080","--coinbase-maturity","1"]
+    ports: ["28082:18081"]
+    depends_on: [node0]
+
+  node2:
+    <<: *common
+    command: ["--datadir","/data","--p2p","0.0.0.0:18080","--rpc","0.0.0.0:18081","--seeds","node0:18080","--coinbase-maturity","1"]
+    ports: ["28083:18081"]
+    depends_on: [node0]
+
+  node3:
+    <<: *common
+    command: ["--datadir","/data","--p2p","0.0.0.0:18080","--rpc","0.0.0.0:18081","--seeds","node0:18080","--coinbase-maturity","1"]
+    ports: ["28084:18081"]
+    depends_on: [node0]
+
+networks:
+  obxnet:
+    driver: bridge

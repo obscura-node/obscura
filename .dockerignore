@@ -1,0 +1,12 @@
+.git
+bin/
+dist/
+website/
+docs/
+*.db
+*.log
+*.csv
+*.html
+scripts/loadtest/out
+**/testdata
+.claude

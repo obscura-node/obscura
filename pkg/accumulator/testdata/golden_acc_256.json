@@ -1,0 +1,50 @@
+{
+  "bits": 256,
+  "seed": "obscura-golden-256-v1",
+  "vectors": [
+    {
+      "name": "genesis",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "value_after_0",
+      "hex": "0010019a5a9f6e4af48c71adbdfa17bbaabc000010012941bde97431823ff8afd0e6a41285"
+    },
+    {
+      "name": "value_after_1",
+      "hex": "00107236c215f1ec9e752be6615989e76eb2000010176a5086ac013f0c2456e7ed5e2e8a9f"
+    },
+    {
+      "name": "value_after_2",
+      "hex": "001029dd445d598e2187dc5fb4da69129a2d0000100c6fef7522d3d76f736e2da4e1a27b77"
+    },
+    {
+      "name": "value_after_3",
+      "hex": "00106038e0b49a7797cad086341be02242660100101fc8a62cf83b46276c70c20857249b11"
+    },
+    {
+      "name": "value_after_4",
+      "hex": "00105d5c76c60337b3bda2a239d7099744200000104632a2192fc258ecc240a6cfbca4918d"
+    },
+    {
+      "name": "witness_0",
+      "hex": "00103db28ba338072257dc37878ab13daaef00001022dcd7810320bafc938932958275ffbb"
+    },
+    {
+      "name": "witness_1",
+      "hex": "0010028ff9b2450e6c6760adb257da61c7d801000fe3dec3e21b6ed6b161a09c2b845d0d"
+    },
+    {
+      "name": "witness_2",
+      "hex": "00101536cfe4aee749fc91340059434ddcd40100101008a338a6cce01cf563050c9185f6cd"
+    },
+    {
+      "name": "witness_3",
+      "hex": "00103fe98876110ed0a6b3c9e25076671ed901001011246127d97bc22acaa92c5fab69b101"
+    },
+    {
+      "name": "witness_4",
+      "hex": "00106038e0b49a7797cad086341be02242660100101fc8a62cf83b46276c70c20857249b11"
+    }
+  ]
+}

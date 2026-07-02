@@ -1,0 +1,131 @@
+{
+  "bits": 256,
+  "seed": "obscura-golden-256-v1",
+  "disc_hex": "-ce532f9943213ba6b83d0ab27d43b2c8d8f26ace92f0a51b02c131486ca2b9d7",
+  "vectors": [
+    {
+      "name": "generator",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "identity",
+      "hex": "00010100000101"
+    },
+    {
+      "name": "exp_0",
+      "hex": "00010100000101"
+    },
+    {
+      "name": "exp_1",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "exp_2",
+      "hex": "00010401000103"
+    },
+    {
+      "name": "exp_3",
+      "hex": "00010801000103"
+    },
+    {
+      "name": "exp_15",
+      "hex": "0002800000000215cd"
+    },
+    {
+      "name": "exp_16",
+      "hex": "0003010000010002ea33"
+    },
+    {
+      "name": "exp_17",
+      "hex": "00030200000000030115cd"
+    },
+    {
+      "name": "exp_255",
+      "hex": "00106389a8b90af0b4ec95d91b0ad9605fc20000103a8c81545a638517c75df2d7d0a583fd"
+    },
+    {
+      "name": "exp_256",
+      "hex": "001046a2ae0845cdd0f02f0a6c142fda35de0100103a8c81545a638517c75df2d7d0a583fd"
+    },
+    {
+      "name": "exp_257",
+      "hex": "00102351570422e6e8781785360a17ed1aef0000100c162cb3eb6a4bd867ac793c5f34b1e1"
+    },
+    {
+      "name": "exp_65535",
+      "hex": "001066258c88ada4426ec940c5cc0ddbbede000010121155d7da0631e6a23f2cdfe7d20b3b"
+    },
+    {
+      "name": "exp_1048576",
+      "hex": "0010273877b6efd4af8644a4aef49e0d14ee00001006bc71ef81b63f1f948ae78d023336a1"
+    },
+    {
+      "name": "exp_neg7",
+      "hex": "00018000000133"
+    },
+    {
+      "name": "exp_prodprimes",
+      "hex": "00106157c8a71cb1601fd766b8b079cb6d26010010086083d404a9123d850f0da4ecec84e7"
+    },
+    {
+      "name": "compose_1_1",
+      "hex": "00010401000103"
+    },
+    {
+      "name": "compose_2_3",
+      "hex": "0001200000010d"
+    },
+    {
+      "name": "compose_5_7",
+      "hex": "000210000100020a33"
+    },
+    {
+      "name": "compose_11_13",
+      "hex": "000401000000000003c515cd"
+    },
+    {
+      "name": "compose_3_3",
+      "hex": "00014001000133"
+    },
+    {
+      "name": "compose_7_2",
+      "hex": "0002020000000201cd"
+    },
+    {
+      "name": "reduce_e1_k1",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "reduce_e1_k7",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "reduce_e1_k65536",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "reduce_e3_k1",
+      "hex": "00010801000103"
+    },
+    {
+      "name": "reduce_e3_k7",
+      "hex": "00010801000103"
+    },
+    {
+      "name": "reduce_e3_k65536",
+      "hex": "00010801000103"
+    },
+    {
+      "name": "reduce_e13_k1",
+      "hex": "0002200000000215cd"
+    },
+    {
+      "name": "reduce_e13_k7",
+      "hex": "0002200000000215cd"
+    },
+    {
+      "name": "reduce_e13_k65536",
+      "hex": "0002200000000215cd"
+    }
+  ]
+}

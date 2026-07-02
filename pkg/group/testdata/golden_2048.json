@@ -1,0 +1,131 @@
+{
+  "bits": 2048,
+  "seed": "obscura-mainnet-sr1",
+  "disc_hex": "-d5626342be2ffbff2b3379a6282967a7b04afaa9d17937f46c5395d02c296c6ece97141587a71fb8f8db1970397fdda1b761e6745588f046465aa4e86c274a9a347dd00bb1a93ae94b722f9338bd5277bfe3b672c56fd9f60f22d652245da62567f698b9f4702d55f2deb2e1ff640eadd8c77fddb46de0ff59f63d1590503212994060ebea82449cdc0ca8cd4d10f7f0f8a51dadad44d152d36fc0241a5d1de8216b799ee0187d6eda4a7669420c56996978864f20551a4fd246a4733d43b2aa83d2b75a91e47ba8ade482736ea9910419e46119db62e20d964b98f3cfff9fc0c32231f0dedaedbd9019dda25a8cc575a9ed8bde4b9ce8b48f1fc1cec70bee7f",
+  "vectors": [
+    {
+      "name": "generator",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "identity",
+      "hex": "00010100000101"
+    },
+    {
+      "name": "exp_0",
+      "hex": "00010100000101"
+    },
+    {
+      "name": "exp_1",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "exp_2",
+      "hex": "00010400000101"
+    },
+    {
+      "name": "exp_3",
+      "hex": "00010800000101"
+    },
+    {
+      "name": "exp_15",
+      "hex": "000280000100023f3f"
+    },
+    {
+      "name": "exp_16",
+      "hex": "00030100000100023f3f"
+    },
+    {
+      "name": "exp_17",
+      "hex": "000302000000000301c0c1"
+    },
+    {
+      "name": "exp_255",
+      "hex": "0020800000000000000000000000000000000000000000000000000000000000000001002012b7766484cc5053924939b84b7d39a77fa4d67a86794bc68af0cff6cad63f3f"
+    },
+    {
+      "name": "exp_256",
+      "hex": "0021010000000000000000000000000000000000000000000000000000000000000000000020ed48899b7b33afac6db6c647b482c658805b29857986b439750f30093529c0c1"
+    },
+    {
+      "name": "exp_257",
+      "hex": "00210200000000000000000000000000000000000000000000000000000000000000000100210112b7766484cc5053924939b84b7d39a77fa4d67a86794bc68af0cff6cad63f3f"
+    },
+    {
+      "name": "exp_65535",
+      "hex": "008034795025db79cd5469db6a123183c2908344a94d00ab443326b47e2efb888a0a02de3bb6c37b4c9d2803f829285cffa97e42a75c6aed6051db5a00187c979b7155fa3e58cefd323a8122ce3f1b75a9f2c5e475d59bc45b989e9b52d67661f5e8850242536b71e2f90fd88d55fc2c5fa9ce9f5f2d3508b3ecc36581e3ad0ffcf301008031ccfac208d0eee6cf807808208bd6e5442c41a2aea77996845e76c4e6772eff06e5d63a63342d29a77056b68f45ef92d731ced17349c47cb628003438343d86be3be246e3418a72ef72215f750ee3e4c556421834c3d40572981206ae272d819893f9f33a5aa11035d1a47dc886dc17481819bb88fd63ab584c14fa798aef07"
+    },
+    {
+      "name": "exp_1048576",
+      "hex": "0080756ce90b80dc6e1bbdbc2ed9683729fc41eeb70dd1d76c79358d5542c1a6e4c4cd269e72d64620f8e73cf373dd86969a5c416a907ab410f6b0d1d25d7baba3ee9fdc5616c8458d2c605e8119713f6aeb2fdc874fbcebb6cc46cea80cbb534e5a5e3fe297575ce86eb0db060538f49802b7461ff15e0a69b70d243902393840020100801828c810a1a78d3c8825da61c381736e1bfc282723707dad138d7427bd07d2e58da0201855b2135c6f484533d39c3575e0f4a15618848de6a3ce97b40eb234c0a7257b84acf46bf7028c2343e8bdef54dd75d52a76121d4aeef6245f0eca7d9c4bf4ef0ae8570e6aaf846a50a1a579a5d40805dc810f40f1120788584263f3d7"
+    },
+    {
+      "name": "exp_neg7",
+      "hex": "0001800000013f"
+    },
+    {
+      "name": "exp_prodprimes",
+      "hex": "00800a442c585ec77156861e1fb19cd543ebfb2da4c5756d05e2b7668b0d90a807485990189d1789bf251c4caff1f111899cdc491735c7ad0cbd293762a0ddedcc3da1157e73063e5c7518891d41c1478f421b554411b09e8fb3dc79f30c68c139cd0f66bc906f7f5dae7924d48f60e22faa8403b8497ef982970fb15645952ff2ee0000800a27fc67cfcaa03de48b74b410b5c01544bf3c4dc98d690a4bbdef03d7357b042e0bcb17738eaac8bd41aa9f17998405e6ecc24a2644fe4cee3c04c041c6f950eb90d2aa219e761a639cb2358db1840446b0084ef82d2121b29913f3b5489bcdf3c28abad7d1dca26649910309dc94c76fbd77ea0b8ec49b0f78f34005cb7671"
+    },
+    {
+      "name": "compose_1_1",
+      "hex": "00010400000101"
+    },
+    {
+      "name": "compose_2_3",
+      "hex": "00012000000101"
+    },
+    {
+      "name": "compose_5_7",
+      "hex": "00021000000001c1"
+    },
+    {
+      "name": "compose_11_13",
+      "hex": "000401000000010003d63f3f"
+    },
+    {
+      "name": "compose_3_3",
+      "hex": "0001400100013f"
+    },
+    {
+      "name": "compose_7_2",
+      "hex": "00020200000001c1"
+    },
+    {
+      "name": "reduce_e1_k1",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "reduce_e1_k7",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "reduce_e1_k65536",
+      "hex": "00010200000101"
+    },
+    {
+      "name": "reduce_e3_k1",
+      "hex": "00010800000101"
+    },
+    {
+      "name": "reduce_e3_k7",
+      "hex": "00010800000101"
+    },
+    {
+      "name": "reduce_e3_k65536",
+      "hex": "00010800000101"
+    },
+    {
+      "name": "reduce_e13_k1",
+      "hex": "00022000000001c1"
+    },
+    {
+      "name": "reduce_e13_k7",
+      "hex": "00022000000001c1"
+    },
+    {
+      "name": "reduce_e13_k65536",
+      "hex": "00022000000001c1"
+    }
+  ]
+}
