@@ -122,7 +122,30 @@ func (n *Node) maybeAddAddr(addr string) {
 	if addr == self || addr == n.addr {
 		return
 	}
+	// A loopback address on OUR OWN listen port is US: dialing it SUCCEEDS (we accept
+	// our own connection), so the book's dial-failure eviction never fires and the node
+	// wedges itself in a self-gossip loop (live incident 2026-07-04: a peer PEX-gossiped
+	// "127.0.0.1:18080" and every network node began dialing itself). Loopback on OTHER
+	// ports stays permitted so multi-node local devnets keep working.
+	if n.isSelfLoopback(addr) {
+		return
+	}
 	n.book.Add(addr)
+}
+
+// isSelfLoopback reports whether addr is a loopback host with our own listen port —
+// an address that can only ever reach ourselves (see maybeAddAddr).
+func (n *Node) isSelfLoopback(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	_, ownPort, err := net.SplitHostPort(n.addr)
+	return err == nil && port == ownPort
 }
 
 // KnownAddresses returns the addresses currently in the peer address book

@@ -29,6 +29,14 @@ import (
 // multi-machine sync stalls. Off by default.
 var p2pDebug = os.Getenv("OBX_P2P_DEBUG") != ""
 
+// p2pNoBan (OBX_P2P_NO_BAN=1) disables the PERSISTENT 1-hour peer ban. Abusive
+// connections are still dropped, but no IP lockout is recorded, so honest peers —
+// our own auto-liquidity mesh and community nodes — reconnect immediately instead
+// of being locked out for an hour. This is a LOCAL connectivity policy only: it does
+// not change the wire protocol or anything a peer sees on the network, so it stays
+// fully backward-compatible with old-binary nodes. Off by default.
+var p2pNoBan = os.Getenv("OBX_P2P_NO_BAN") != ""
+
 func p2pLog(format string, a ...any) {
 	if p2pDebug {
 		log.Printf("[p2p] "+format, a...)
@@ -264,7 +272,14 @@ func (n *Node) PostOffer(o *swapbook.Offer) error {
 	if _, err := n.obook.Add(o); err != nil {
 		return err
 	}
-	n.broadcast(msgSwapOffer, o.Serialize(), nil)
+	// Gossip ASYNC: the offer is already in the local book (the caller's success
+	// condition), so a back-pressured peer socket must never stall the caller — the
+	// same reasoning as BroadcastBlock. Synchronous broadcast here made the RPC
+	// /offer POST block past the website proxy's timeout when a peer's send buffer
+	// was full, surfacing as a spurious "node unreachable" on a sell that actually
+	// posted (live incident 2026-07-06). Peers also converge via periodic offer
+	// gossip / msgGetOffers, so a dropped relay is self-healing.
+	go n.broadcast(msgSwapOffer, o.Serialize(), nil)
 	return nil
 }
 
@@ -355,13 +370,14 @@ func (n *Node) Start(seeds []string) error {
 		n.advertiseAddr = n.addr
 	}
 	for _, s := range seeds {
-		n.book.Add(s)
+		n.book.AddSticky(s) // seeds are sticky bootstrap: retried on every start, never evicted
 	}
 	go n.acceptLoop(ln)
 	for _, s := range seeds {
 		go n.dial(s)
 	}
 	go n.discoveryLoop()
+	go n.reconnectLoop() // 5-min sweep: re-dial recently-connected peers that dropped
 	go n.syncLoop()
 	go n.stemEpochLoop()
 	return nil
@@ -517,7 +533,20 @@ func (n *Node) handle(conn net.Conn, outbound bool, dialedAddr string) {
 		return
 	}
 	typ, payload, err := n.readMsg(conn)
-	if err != nil || typ != msgHello || !n.checkHello(p, payload) {
+	if err != nil {
+		// A read error during the handshake is NOT evidence of misbehavior: the usual
+		// causes are an honest peer restarting mid-dial, a peer that currently has US
+		// banned closing the socket at accept, or plain network failure. Hard-banning
+		// this case live-deadlocked the mainnet (2026-07-02): each side's failed
+		// handshake read instantly group-banned the other, and every redial re-armed
+		// the opposite ban, so restarting nodes one at a time could never recover —
+		// only a simultaneous stop-both/start-both cleared it. Drop the connection
+		// with no penalty; protocol garbage is judged below, once there are bytes to
+		// judge (and readMsg's own frame-magic check already rejects cross-network
+		// peers cheaply — their redials are bounded by dial backoff + inbound caps).
+		return
+	}
+	if typ != msgHello || !n.checkHello(p, payload) {
 		n.penalize(remote, banThreshold) // protocol violation -> ban
 		return
 	}
@@ -695,6 +724,14 @@ func (n *Node) checkHello(p *peer, payload []byte) bool {
 		return false
 	}
 	advertise := string(payload[16 : 16+advLen])
+	// Self-connection guard: a "peer" advertising EXACTLY our own public address is
+	// ourselves (a self-dial via a poisoned book entry — e.g. loopback:ownport spread
+	// over PEX, live incident 2026-07-04) or an unreachable impersonator; either way
+	// the connection is worthless and wedges gossip. Uses only the existing hello
+	// fields, so it is wire-compatible with older peers.
+	if selfAdv := n.getAdvertise(); selfAdv != "" && advertise == selfAdv {
+		return false
+	}
 	observedSelf, peerVer := parseHelloTrailer(payload[16+advLen:])
 	// audit ROUND2 [88]: p.bestHeight/version/listen are read under n.mu by BestKnownHeight /
 	// PeerVersionCounts / the connected-addr sweep, so their WRITES must take n.mu too (the
@@ -803,7 +840,15 @@ func (n *Node) dispatch(p *peer, typ byte, payload []byte) bool {
 			return n.penalize(remote, 5)
 		}
 		if err := n.mp.Add(t); err != nil {
-			return n.penalize(remote, 1) // invalid/duplicate tx
+			// A tx that fails mempool admission is NOT necessarily abuse: a node that is
+			// BEHIND (or mid-resync) legitimately rejects the tip's txs because they spend
+			// outputs / nullifiers it hasn't applied yet, and duplicates are normal gossip.
+			// Hard-banning that relayer isolated a lagging node from the very peers feeding
+			// it the chain — a behind node banned the community MINERS, cutting off block
+			// delivery and freezing sync (live 2026-07-03). Treat as SOFT, connection-local:
+			// no persistent IP/group ban, so an honest peer is never blocked for relaying
+			// valid-but-not-yet-verifiable txs. Malformed tx BYTES still hard-ban above.
+			return n.penalizeConn(remote, 1)
 		}
 		n.markFluffed(t.Hash()) // cancels any embargo; stops re-stemming
 		n.broadcast(msgTx, payload, p.conn)
@@ -818,6 +863,12 @@ func (n *Node) dispatch(p *peer, typ byte, payload []byte) bool {
 		n.stemRelay(t, payload, p) // continue stem or transition to fluff
 	case msgGetAddr:
 		for _, a := range n.book.Sample(16) {
+			// Don't SPREAD self-loopback poison persisted by older binaries (see
+			// maybeAddAddr) — every clearnet node shares the standard port, so a
+			// loopback:ownport entry self-wedges whoever we hand it to.
+			if n.isSelfLoopback(a) {
+				continue
+			}
 			_ = n.send(p, msgAddr, []byte(a))
 		}
 	case msgAddr:
@@ -832,7 +883,13 @@ func (n *Node) dispatch(p *peer, typ byte, payload []byte) bool {
 		}
 		isNew, err := n.obook.Add(o)
 		if err != nil {
-			return n.penalize(remote, 2) // invalid/expired offer
+			// Connection-local penalty only: a stale-but-well-formed offer is normal
+			// gossip, not abuse — a just-restarted peer relays its persisted book, and
+			// every expired/superseded entry used to land 2 HARD points, so the miner's
+			// 16-rung auto-liquidity ladder alone (32 pts > banThreshold 20) instantly
+			// group-banned honest peers on reconnect (live incident 2026-07-02).
+			// Undeserializable offer bytes above still take the hard penalize(5) path.
+			return n.penalizeConn(remote, 2)
 		}
 		// Record WHICH peer relayed this maker's offer (refreshed on every admitted
 		// offer, new or repeat) so /swaps/take can route the Init to the maker's peer.
@@ -882,19 +939,27 @@ func (n *Node) penalize(remote string, pts int) bool {
 	if p, ok := n.peers[remote]; ok {
 		p.score += pts
 		if p.score >= banThreshold {
-			n.bans[hostOf(remote)] = now.Unix() + groupBanDuration
+			if !p2pNoBan {
+				n.bans[hostOf(remote)] = now.Unix() + groupBanDuration
+			}
 			disconnect = true
 		}
 	}
 	// accumulate the persistent, time-decaying group score (survives reconnects).
 	if n.addGroupScoreLocked(remote, float64(pts), now) >= groupBanThreshold {
-		n.bans[hostOf(remote)] = now.Unix() + groupBanDuration
+		if !p2pNoBan {
+			n.bans[hostOf(remote)] = now.Unix() + groupBanDuration
+		}
 		disconnect = true
 	}
 	if disconnect {
 		// Bans were previously SILENT on both sides (round-3 audit: an operator could
-		// not tell why a peer vanished for an hour). Always log the ban event.
-		log.Printf("p2p: BANNED %s for %ds (misbehavior score over threshold)", hostOf(remote), groupBanDuration)
+		// not tell why a peer vanished for an hour). Always log the event.
+		if p2pNoBan {
+			log.Printf("p2p: dropped %s (misbehavior score over threshold; no-ban mode, may reconnect)", hostOf(remote))
+		} else {
+			log.Printf("p2p: BANNED %s for %ds (misbehavior score over threshold)", hostOf(remote), groupBanDuration)
+		}
 		return false
 	}
 	return true
@@ -1015,12 +1080,50 @@ func (n *Node) discoveryLoop() {
 		n.advMu.RUnlock()
 		if need > 0 {
 			for _, a := range n.book.Sample(need * 2) {
-				if a != n.addr && a != selfAdv && !connected[a] {
+				// isSelfLoopback: never dial loopback:ownport — it connects to OURSELVES
+				// (poisoned persisted books from before the maybeAddAddr filter existed).
+				if a != n.addr && a != selfAdv && !connected[a] && !n.isSelfLoopback(a) {
 					go n.dialOnce(a)
 				}
 			}
 		}
 		n.book.Save()
+	}
+}
+
+// reconnectLoop runs every 5 minutes and proactively re-dials RECENTLY-CONNECTED peers
+// that have since dropped or gone offline, so the node actively rejoins its last-known-
+// good set after a transient partition or a peer restart. This is independent of
+// discoveryLoop, which stops dialing once the outbound-slot target is met and therefore
+// does NOT chase a specific good peer that just vanished. Together with sticky seeds,
+// this keeps the mesh (and returning community nodes) glued back together. Purely local
+// outbound behavior — no wire change.
+func (n *Node) reconnectLoop() {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-n.done:
+			return
+		case <-t.C:
+		}
+		n.mu.Lock()
+		connected := make(map[string]bool)
+		for _, p := range n.peers {
+			if p.listen != "" {
+				connected[p.listen] = true
+			}
+		}
+		n.mu.Unlock()
+		n.advMu.RLock()
+		selfAdv := n.advertiseAddr
+		n.advMu.RUnlock()
+		// Re-dial peers seen good within the last 24h that aren't currently connected.
+		for _, a := range n.book.RecentlySeen(24 * 3600) {
+			if a != n.addr && a != selfAdv && !connected[a] && !n.isSelfLoopback(a) {
+				go n.dialOnce(a)
+			}
+		}
 	}
 }
 
@@ -1234,11 +1337,19 @@ func (n *Node) send(p *peer, typ byte, payload []byte) error {
 	hdr[4] = typ
 	binary.BigEndian.PutUint32(hdr[5:9], uint32(len(payload)))
 	if _, err := conn.Write(hdr[:]); err != nil {
+		conn.Close() // see below
 		return err
 	}
 	if len(payload) > 0 {
-		_, err := conn.Write(payload)
-		return err
+		if _, err := conn.Write(payload); err != nil {
+			// A peer whose socket stays full (not reading for >writeTimeout) is wedged,
+			// not slow: left connected, it costs EVERY subsequent broadcast the full
+			// writeTimeout stall, serially, forever (live incident 2026-07-04 — offer
+			// gossip network-wide starved behind one stuck peer). Closing tears the
+			// connection down via its read loop; a healthy peer just redials.
+			conn.Close()
+			return err
+		}
 	}
 	return nil
 }

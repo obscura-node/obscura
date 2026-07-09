@@ -19,7 +19,8 @@ import (
 type AddrBook struct {
 	mu     sync.Mutex
 	addrs  map[string]*addrInfo
-	groups map[string]int // count of addresses per IP group (/16) — eclipse defense
+	groups map[string]int   // count of addresses per IP group (/16) — eclipse defense
+	sticky map[string]bool  // bootstrap addrs that must never be evicted (seeds + known peers)
 	path   string
 }
 
@@ -76,7 +77,7 @@ type addrInfo struct {
 // NewAddrBook loads (or creates) an address book persisted at path. An empty
 // path keeps it in memory only.
 func NewAddrBook(path string) *AddrBook {
-	ab := &AddrBook{addrs: make(map[string]*addrInfo), groups: make(map[string]int), path: path}
+	ab := &AddrBook{addrs: make(map[string]*addrInfo), groups: make(map[string]int), sticky: make(map[string]bool), path: path}
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil {
 			var list []*addrInfo
@@ -117,6 +118,26 @@ func (ab *AddrBook) Add(addr string) {
 	ab.groups[g]++
 }
 
+// AddSticky records a BOOTSTRAP address that must never be evicted by the failure
+// counter — configured seeds and known old/community peers. Effect: the node keeps
+// these in its address book across restarts AND runtime failures, so it re-dials them
+// on every start and after a partition instead of forgetting them once they fail
+// maxAddrFails times. Sticky addrs bypass the size/group caps because they are
+// operator-provided bootstrap (not attacker-gossiped), so they cannot be abused for
+// eclipse flooding; group-diverse Sample() still governs the actual dial set.
+func (ab *AddrBook) AddSticky(addr string) {
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return
+	}
+	ab.mu.Lock()
+	defer ab.mu.Unlock()
+	ab.sticky[addr] = true
+	if _, ok := ab.addrs[addr]; !ok {
+		ab.addrs[addr] = &addrInfo{Addr: addr}
+		ab.groups[ipGroup(addr)]++
+	}
+}
+
 // Seen marks an address as successfully contacted.
 func (ab *AddrBook) Seen(addr string) {
 	ab.mu.Lock()
@@ -140,7 +161,9 @@ func (ab *AddrBook) Failed(addr string) {
 	defer ab.mu.Unlock()
 	if a, ok := ab.addrs[addr]; ok {
 		a.Fails++
-		if a.Fails > maxAddrFails {
+		// Sticky bootstrap addresses (seeds + known old/community peers) are NEVER
+		// evicted — the node keeps retrying them so it can rejoin after a partition.
+		if a.Fails > maxAddrFails && !ab.sticky[addr] {
 			delete(ab.addrs, addr)
 			if g := ipGroup(addr); ab.groups[g] > 0 {
 				ab.groups[g]--
@@ -185,6 +208,24 @@ func (ab *AddrBook) Sample(n int) []string {
 		}
 		if !progressed {
 			break
+		}
+	}
+	return out
+}
+
+// RecentlySeen returns addresses that were SUCCESSFULLY contacted within the last
+// withinSec seconds — the "latest connected" peers. The reconnect sweep uses this to
+// proactively re-dial peers that dropped or went offline, so the node rejoins its
+// last-known-good set after a transient partition or a peer restart, without waiting
+// for the peer-count target.
+func (ab *AddrBook) RecentlySeen(withinSec int64) []string {
+	ab.mu.Lock()
+	defer ab.mu.Unlock()
+	cutoff := time.Now().Unix() - withinSec
+	out := make([]string, 0)
+	for a, info := range ab.addrs {
+		if info.LastSeen >= cutoff {
+			out = append(out, a)
 		}
 	}
 	return out

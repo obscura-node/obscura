@@ -142,8 +142,16 @@ const (
 // rebuild. For a MAINNET launch, replace the raw droplet IPs below with stable DNS
 // seed hostnames — see the go-live checklist (docs/GO_LIVE_CHECKLIST.md).
 var DefaultSeeds = []string{
-	"139.59.183.15:18080",  // obx-g (miner/seed, also the hosted-wallet RPC target)
-	"188.166.153.86:18080", // obx-h (follower)
+	"139.59.183.15:18080",   // obx-g (miner/seed, also the hosted-wallet RPC target)
+	"188.166.153.86:18080",  // obx-h (follower)
+	"187.127.123.229:18080", // obx (Hostinger)
+	"92.113.148.61:18080",   // obx (chainreactio)
+	// Known community / older peers. Baked in as STICKY bootstrap (see AddrBook.AddSticky):
+	// dialed on every start and never evicted by the failure counter, so the node keeps
+	// re-seeking them and can rejoin after a partition. They are only ever DIALED, never
+	// trusted, and count toward the /16-diverse dial set — no eclipse risk.
+	"191.242.51.98:18080",
+	"51.210.241.130:18080",
 }
 
 func init() {
