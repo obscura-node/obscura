@@ -1,0 +1,37 @@
+# One-click Obscura full node + miner, built from the official signed release
+# (not source — this repo's cmd/obscura-node entrypoint is not published here).
+# Verifies the release checksum at build time, same as install.sh.
+#
+#   docker run -d --name obscura -p 18080:18080 -v obscura-data:/data ghcr.io/you/obscura
+#
+# Tor is bundled so the default privacy mode (onion-only P2P) works out of the box.
+FROM alpine:3.20
+
+ARG OBX_RELEASE_BASE=https://obscura-protocol.space/releases
+
+RUN apk add --no-cache curl tar ca-certificates tor \
+ && set -eu \
+ && ARCH="$(uname -m)" \
+ && case "$ARCH" in \
+      x86_64)  ASSET=Obscura-linux-amd64.tar.gz ;; \
+      aarch64) ASSET=Obscura-linux-arm64.tar.gz ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac \
+ && curl -fL "$OBX_RELEASE_BASE/$ASSET" -o /tmp/obx.tar.gz \
+ && PUB="$(curl -fsSL "$OBX_RELEASE_BASE/SHA256SUMS.txt" | awk -v a="$ASSET" '$2==a{print $1}')" \
+ && GOT="$(sha256sum /tmp/obx.tar.gz | awk '{print $1}')" \
+ && [ -n "$PUB" ] && [ "$GOT" = "$PUB" ] \
+ && tar xzf /tmp/obx.tar.gz -C /tmp \
+ && mv /tmp/Obscura-linux-*/obscura-node /usr/local/bin/obscura-node \
+ && chmod +x /usr/local/bin/obscura-node \
+ && rm -rf /tmp/* \
+ && adduser -D -h /data obx \
+ && mkdir -p /data && chown obx:obx /data
+
+USER obx
+WORKDIR /data
+VOLUME ["/data"]
+EXPOSE 18080 18081
+ENTRYPOINT ["obscura-node"]
+CMD ["--datadir","/data","--mine","--rpc","0.0.0.0:18081", \
+     "--seeds","139.59.183.15:18080,188.166.153.86:18080,187.127.123.229:18080,92.113.148.61:18080"]

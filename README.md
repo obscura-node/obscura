@@ -86,6 +86,14 @@ iwr -useb https://obscura-protocol.space/install.ps1 | iex
 
 Or grab a build from the **[GitHub releases](https://github.com/obscura-node/obscura/releases)** or the [download page](https://obscura-protocol.space/download) and verify it against [RELEASES.md](RELEASES.md) checksums. For a desktop wallet + swaps + mining in a window, unzip the macOS/Windows/Linux build and open it.
 
+**Or one-click with Docker** (builds a container from the official signed release — Tor bundled, checksum-verified at build time):
+
+```sh
+docker build -f Dockerfile.node -t obscura-node .
+docker run -d --name obscura -p 18080:18080 -v obscura-data:/data obscura-node
+docker logs -f obscura   # watch it sync + mine
+```
+
 **Privacy by default (Tor).** The node routes its P2P over **Tor automatically** — on startup it launches a `tor` hidden service and runs *onion-only*, so peers see only your `.onion`, never your home IP (ideal for mining from home). It needs a `tor` binary on `PATH` (the installer sets this up); if tor is missing it fails closed rather than leaking your IP. Pass `--clearnet` to run as a public clearnet node instead (for seed/public nodes and CI). Details: <https://obscura-protocol.space/docs/cli>.
 
 ## Links
