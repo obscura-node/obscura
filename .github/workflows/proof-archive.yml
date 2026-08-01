@@ -1,0 +1,65 @@
+name: Proof archive
+
+# Daily: fetches one recent, finalized block (full hex, including every
+# confidential tx's zk-STARK proof bytes) from the live public site and
+# commits it to proof-archive/ — see proof-archive/README.md for what it is
+# and how to verify it yourself. Idempotent (skips if that height is already
+# archived) and self-throttling (picks tip-20 so it never archives a block
+# that could still get reorged). Uses only the workflow-scoped GITHUB_TOKEN
+# GitHub Actions provides automatically -- no new secrets.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch + archive a recent finalized block
+        run: |
+          set -euo pipefail
+
+          summary=$(curl -fsSL "https://obscura-protocol.space/api/explorer?path=summary")
+          tip=$(echo "$summary" | jq -r '.height // 0')
+          target=$(( tip - 20 ))
+          if [ "$target" -le 0 ]; then
+            echo "chain too short yet, skipping"
+            exit 0
+          fi
+
+          mkdir -p proof-archive
+          hexfile="proof-archive/${target}.hex"
+          jsonfile="proof-archive/${target}.json"
+
+          if [ -f "$hexfile" ]; then
+            echo "height $target already archived, skipping"
+            exit 0
+          fi
+
+          raw=$(curl -fsSL "https://obscura-protocol.space/api/explorer?path=rawblock&height=${target}")
+          echo "$raw" | jq -r '.block' > "$hexfile"
+
+          redacted=$(curl -fsSL "https://obscura-protocol.space/api/explorer?path=block&height=${target}")
+          echo "$redacted" | jq '{height, hash, time, tx_count: (.txs | length), archived_at: (now | todate)}' > "$jsonfile"
+
+          echo "archived height $target"
+          echo "ARCHIVED_HEIGHT=$target" >> "$GITHUB_ENV"
+
+      - name: Commit + push
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain proof-archive/)" ]; then
+            echo "nothing new to commit"
+            exit 0
+          fi
+          git config user.name "obscura-proof-archive-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add proof-archive/
+          git commit -m "proof-archive: add block ${ARCHIVED_HEIGHT:-unknown}"
+          git push
