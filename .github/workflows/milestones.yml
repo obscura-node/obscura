@@ -1,0 +1,62 @@
+name: Milestone watcher
+
+# Polls the live public site for chain height and total settled swaps, and
+# auto-publishes a GitHub Release the first time a round-number milestone is
+# crossed (block height in steps of 500; swap count at a fixed list of round
+# numbers). Idempotent: each milestone gets its own tag, and `gh release view`
+# is checked first so a milestone is only ever published once, no matter how
+# many times this runs. No secrets are provisioned here — it uses the
+# workflow-scoped GITHUB_TOKEN GitHub Actions provides automatically.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check + publish milestones
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          summary=$(curl -fsSL "https://obscura-protocol.space/api/explorer?path=summary")
+          height=$(echo "$summary" | jq -r '.height // 0')
+
+          stats=$(curl -fsSL "https://obscura-protocol.space/api/explorer?path=stats&pair=OBX%2FXNO")
+          trades=$(echo "$stats" | jq -r '.trades // 0')
+
+          echo "height=$height trades=$trades"
+
+          # ---- block-height milestones: every 500 blocks ----
+          height_step=500
+          height_milestone=$(( (height / height_step) * height_step ))
+          if [ "$height_milestone" -gt 0 ]; then
+            tag="milestone-height-${height_milestone}"
+            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                --title "Block ${height_milestone} mined" \
+                --notes "Obscura's chain just crossed **block ${height_milestone}** (live height ${height} at publish time). Watch it live: https://obscura-protocol.space/explorer"
+              echo "created $tag"
+            fi
+          fi
+
+          # ---- swap milestones: fixed round numbers, front-loaded while early ----
+          for n in 1 5 10 25 50 100 250 500 1000 2500 5000 10000; do
+            if [ "$trades" -ge "$n" ]; then
+              tag="milestone-swaps-${n}"
+              if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                if [ "$n" = "1" ]; then plural=""; else plural="s"; fi
+                gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                  --title "${n} atomic swap${plural} settled" \
+                  --notes "Obscura's non-custodial OBX<->XNO atomic swap has now settled **${n} real swap${plural}** on the live order book. Try it: https://obscura-protocol.space/wallet"
+                echo "created $tag"
+              fi
+            fi
+          done
