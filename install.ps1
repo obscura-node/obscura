@@ -9,7 +9,7 @@
 #   iwr -useb https://obscura-protocol.space/install.ps1 | iex
 #
 # Pass node flags via $NodeArgs (defaults: --mine --seeds <mainnet seeds>):
-#   & ([scriptblock]::Create((iwr -useb https://obscura-protocol.space/install.ps1))) --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
+#   & ([scriptblock]::Create((iwr -useb https://obscura-protocol.space/install.ps1))) --mine --seeds 187.127.123.229:18080
 #
 # PRIVACY: the node hides your real IP by default — it auto-starts Tor and routes
 # all P2P over a hidden service (no setup needed). This installer best-effort
@@ -49,7 +49,7 @@ $Dir   = "Obscura-windows-$Arch"
 $Bin   = Join-Path $Dir 'obscura-node.exe'
 $DataDir = if ($env:OBX_DATADIR) { $env:OBX_DATADIR } else { Join-Path $env:USERPROFILE '.obscura' }
 $Marker  = Join-Path $DataDir '.installed-sha'
-$DefaultArgs = @('--mine', '--seeds', '139.59.183.15:18080,188.166.153.86:18080')
+$DefaultArgs = @('--mine', '--seeds', '187.127.123.229:18080')
 
 function Get-PubSha {
   try {

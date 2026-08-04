@@ -10,7 +10,7 @@
 #   curl -fsSL https://obscura-protocol.space/install.sh | sh
 #
 # Pass node flags after `-s --` (defaults: --mine --seeds <mainnet seeds>):
-#   curl -fsSL https://obscura-protocol.space/install.sh | sh -s -- --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
+#   curl -fsSL https://obscura-protocol.space/install.sh | sh -s -- --mine --seeds 187.127.123.229:18080
 #
 # PRIVACY: the node hides your real IP by default — it auto-starts Tor and routes
 # all P2P over a hidden service (no setup needed). This installer best-effort
@@ -44,7 +44,7 @@ TAG="v1.0.0"
 BASE="https://obscura-protocol.space/releases"
 DATADIR="${OBX_DATADIR:-$HOME/.obscura}"
 MARKER="$DATADIR/.installed-sha"
-DEFAULT_ARGS="--mine --seeds 139.59.183.15:18080,188.166.153.86:18080"
+DEFAULT_ARGS="--mine --seeds 187.127.123.229:18080"
 
 os="$(uname -s)"; arch="$(uname -m)"
 case "$os-$arch" in

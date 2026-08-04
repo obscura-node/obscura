@@ -28,7 +28,7 @@ Manual alternative (no upgrade logic):
 
 ```sh
 curl -fL https://obscura-protocol.space/releases/Obscura-linux-amd64.tar.gz | tar xz \
-  && ./Obscura-linux-amd64/obscura-node --mine --seeds 139.59.183.15:18080,188.166.153.86:18080
+  && ./Obscura-linux-amd64/obscura-node --mine --seeds 187.127.123.229:18080
 ```
 
 | Platform | File |

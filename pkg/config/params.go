@@ -141,17 +141,24 @@ const (
 // log spam); repointing the DNS record re-seeds every stock binary without a
 // rebuild. For a MAINNET launch, replace the raw droplet IPs below with stable DNS
 // seed hostnames — see the go-live checklist (docs/GO_LIVE_CHECKLIST.md).
+// TEMPORARY (2026-08-04): obx-g and obx-h (the DigitalOcean droplets below) are
+// powered off pending a billing issue on that account; 92.113.148.61 and the two
+// sticky peers are unreachable too. 187.127.123.229 (Hostinger, NOT DigitalOcean,
+// so unaffected) is the only currently-live seed — trimmed the list down to just
+// it so a fresh install doesn't waste its first connection attempts on dead
+// addresses. Restore the full list below once the others are back up.
 var DefaultSeeds = []string{
-	"139.59.183.15:18080",   // obx-g (miner/seed, also the hosted-wallet RPC target)
-	"188.166.153.86:18080",  // obx-h (follower)
-	"187.127.123.229:18080", // obx (Hostinger)
-	"92.113.148.61:18080",   // obx (chainreactio)
+	"187.127.123.229:18080", // obx (Hostinger) — the only confirmed-live seed right now
+	// Down as of 2026-08-04 (see note above) — restore once back online:
+	// "139.59.183.15:18080",   // obx-g (miner/seed, also the hosted-wallet RPC target)
+	// "188.166.153.86:18080",  // obx-h (follower)
+	// "92.113.148.61:18080",   // obx (chainreactio)
 	// Known community / older peers. Baked in as STICKY bootstrap (see AddrBook.AddSticky):
 	// dialed on every start and never evicted by the failure counter, so the node keeps
 	// re-seeking them and can rejoin after a partition. They are only ever DIALED, never
 	// trusted, and count toward the /16-diverse dial set — no eclipse risk.
-	"191.242.51.98:18080",
-	"51.210.241.130:18080",
+	// "191.242.51.98:18080",
+	// "51.210.241.130:18080",
 }
 
 func init() {
